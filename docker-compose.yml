@@ -22,9 +22,6 @@ services:
       - DATABASE_URL=postgresql://octopus:octopus@postgres:5432/octopus
       - QDRANT_URL=http://qdrant:6333
       - ENABLE_REVIEW_WORKERS=true
-    networks:
-      - applications
-      - database
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,8 +39,6 @@ services:
       POSTGRES_DB: octopus
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    networks:
-      - database
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U octopus"]
       interval: 5s
@@ -58,41 +53,12 @@ services:
       - "43334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
-    networks:
-      - database
     healthcheck:
-      test:
-        [
-          "CMD",
-          "wget",
-          "--no-verbose",
-          "--tries=1",
-          "--spider",
-          "http://localhost:6333/readyz",
-        ]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:6333/readyz"]
       interval: 5s
       timeout: 5s
       retries: 5
     restart: unless-stopped
-
-  cloudflared:
-    # Tunnel ID: f3189671-8498-4eaf-b961-cd58097b9661
-    image: cloudflare/cloudflared:latest
-    container_name: cloudflared
-    restart: unless-stopped
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
-    # Direct network access to host or other compose services
-    networks:
-      - applications
-
-networks:
-  database:
-    driver: bridge
-    internal: true
-
-  applications:
-    driver: bridge
-    name: applications
 
 volumes:
   postgres_data:
