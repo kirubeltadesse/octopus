@@ -5,9 +5,14 @@ import { validReviewFindings, markReviewAssessmentIncomplete } from "@/lib/revie
 import { normalizeLastReviewedCommit, normalizeScoreDenominators, reconcileScoreTable } from "@/lib/review-helpers";
 import { sanitizeMermaidInMarkdown } from "@/lib/mermaid-utils";
 import { containExcludedInputClaims, parseReviewFindingsSet, recoveryFindingsBody, parseRecoveryFindingsSet, excludedInputGapReport } from "@/lib/review-evidence";
+import { stripReasoningArtifacts } from "@/lib/review-github-summary";
 
 function findingsBlocks(body: string): string[] {
   return body.match(/<!-- OCTOPUS_FINDINGS_START -->[\s\S]*?<!-- OCTOPUS_FINDINGS_END -->/g) ?? [];
+}
+
+export function stripReviewReasoningArtifacts(body: string): string {
+  return mapReviewPresentation(body, (presentation) => stripReasoningArtifacts(presentation));
 }
 
 export function mapReviewPresentation(body: string, transform: (presentation: string) => string): string {
@@ -40,7 +45,8 @@ export function prepareReviewPresentation(body: string, coverage: ReviewCoverage
   const contained = containExcludedInputClaims(body, coverage);
   if (contained.paths.length > 0) markExcludedInputAssessment(coverage);
   const cleaned = mapReviewPresentation(contained.body, presentation => {
-    let result = presentation.replace(/([^\n])```(\n|$)/g, "$1\n```$2")
+    let result = stripReasoningArtifacts(presentation);
+    result = result.replace(/([^\n])```(\n|$)/g, "$1\n```$2")
       .replace(/```([^`\n\sa-z])/g, "```\n\n$1");
     result = normalizeScoreDenominators(result);
     result = result.replace(/### Diagram\s*\n[\s\S]*?(?=\n### |\n## |$)/, section => {
@@ -59,8 +65,9 @@ export function finalizeReviewPresentation(
 ): { report: string; comment: string } {
   enforceReviewFindingsIntegrity(original, report, coverage);
   const finalize = (body: string) => mapReviewPresentation(body, presentation => {
-    const assessed = reviewAssessmentComplete(coverage) && coverage.assessment?.state === "completed" ? reconcileScoreTable(presentation, findings)
-      : applyReviewCoverage(presentation.replace(/### Review coverage[\s\S]*?\nAssessment: [^\n]*\n\n/, ""), coverage, attemptId);
+    const stripped = stripReasoningArtifacts(presentation);
+    const assessed = reviewAssessmentComplete(coverage) && coverage.assessment?.state === "completed" ? reconcileScoreTable(stripped, findings)
+      : applyReviewCoverage(stripped.replace(/### Review coverage[\s\S]*?\nAssessment: [^\n]*\n\n/, ""), coverage, attemptId);
     return normalizeLastReviewedCommit(assessed, coverage.headSha);
   });
   return { report: finalize(report), comment: finalize(comment) };

@@ -505,22 +505,8 @@ export function buildInlineComments(
       body += `\n\n<details><summary>📌 Grounding</summary>\n\n${groundingParts.join("\n\n")}\n\n</details>`;
     }
 
-    // AI Fix Prompt — collapsible section with copy-pasteable prompt
-    const severityLabel = f.severity === "🔴" ? "Critical" : f.severity === "🟠" ? "High" : f.severity === "🟡" ? "Medium" : f.severity === "🔵" ? "Low" : "Nit";
-    const categoryNote = f.category ? ` (${f.category})` : "";
-    const lineRange = f.startLine === f.endLine ? `line ${f.startLine}` : `lines ${f.startLine}-${f.endLine}`;
-    let aiPrompt = `Fix the following ${severityLabel}${categoryNote} issue in \`${f.filePath}\` at ${lineRange}:\n\n`;
-    aiPrompt += `Problem: ${f.description}`;
-    if (f.suggestion) {
-      aiPrompt += `\n\nSuggested fix:\n${f.suggestion}`;
-    }
-    // Fold minimumFixScope into the AI fix prompt too — an assistant
-    // running this prompt should respect the bounded change scope, not
-    // expand it into a cross-cutting refactor.
-    if (f.minimumFixScope) {
-      aiPrompt += `\n\nScope: ${f.minimumFixScope}`;
-    }
-    body += `\n\n<details><summary>🤖 AI Fix Prompt</summary>\n\n\`\`\`\n${aiPrompt}\n\`\`\`\n\n</details>`;
+    // Per-finding fix prompts are intentionally omitted from inline comments.
+    // A single consolidated "🤖 Fix with Agent" prompt is included in the GitHub summary comment.
 
     // Snap note last — it's a footnote-style hint about where the comment
     // landed, not part of the description or suggestion. Keeping it at the

@@ -444,11 +444,11 @@ describe("buildInlineComments", () => {
     expect(comments[0].body).not.toContain("```suggestion");
   });
 
-  it("includes AI Fix Prompt section", () => {
+  it("does not include per-finding AI Fix Prompt section", () => {
     const findings = [makeFinding()];
     const diffLines = new Map([["src/index.ts", new Set([10, 11, 12])]]);
     const comments = buildInlineComments(findings, diffLines);
-    expect(comments[0].body).toContain("AI Fix Prompt");
+    expect(comments[0].body).not.toContain("AI Fix Prompt");
   });
 });
 

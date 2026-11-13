@@ -65,7 +65,8 @@ import { prepareReviewInput, applyReviewCoverage, coverageSummary, reviewCheckRe
 import { prepareReviewComment } from "@/lib/review-comment-context";
 import { createCoveredReviewRequest } from "@/lib/review-request";
 import { canRestrictReviewToFollowUp } from "@/lib/review-follow-up";
-import { prepareRecoveredReviewPresentation, prepareReviewPresentation, mapReviewPresentation, enforceReviewFindingsIntegrity, finalizeReviewPresentation } from "@/lib/review-presentation";
+import { prepareRecoveredReviewPresentation, prepareReviewPresentation, mapReviewPresentation, enforceReviewFindingsIntegrity, finalizeReviewPresentation, stripReviewReasoningArtifacts } from "@/lib/review-presentation";
+import { formatGitHubReviewSummary, formatInvalidAssessmentSummary } from "@/lib/review-github-summary";
 import { executeCoveredReview, executeFindingsRecovery, recordNoModelAssessment, markReviewAssessmentIncomplete } from "@/lib/review-assessment";
 import { saveReviewAttempt, createReviewAttemptComment, updateCurrentReview, withForgejoReviewPublication, recordFirstReviewCompletion, recordInterruptedAttempt } from "@/lib/review-attempt";
 import { deliverReviewAttempt } from "@/lib/review-attempt-delivery";
@@ -654,7 +655,7 @@ export async function processReview(pullRequestId: string, executionWindow?: Rev
  * A worker can stop after archiving its result and before publishing it, which leaves a completed PR with a
  * placeholder comment and an unfinished check. A redelivered job finishes that publication from the archive.
  */
-async function resumeReviewPublication(pr: Prisma.PullRequestGetPayload<{ include: { repository: { include: { organization: true } } } }>): Promise<void> {
+  async function resumeReviewPublication(pr: Prisma.PullRequestGetPayload<{ include: { repository: { include: { organization: true } } } }>): Promise<void> {
   const repo = pr.repository;
   const installationId = repo.installationId ?? repo.organization.githubInstallationId;
   if (repo.provider !== "github" || !installationId || !pr.reviewAttemptId || !pr.reviewBody) return;
@@ -672,9 +673,13 @@ async function resumeReviewPublication(pr: Prisma.PullRequestGetPayload<{ includ
   outcomeRecord.assessment(coverage, attempt.id);
   await deliverReviewAttempt(attempt.id, async () => {
     // The comment is derived from the archived report; the check uses the findings saved with it.
-    const body = `Review attempt: ${attempt.id}. Head: ${pr.headSha ?? "unknown"}.\n\n${stripDetailedFindings(attempt.reviewBody)}`;
+    const archivedFindings = parseFindings(attempt.reviewBody);
+    const reviewHistoryUrl = new URL(`/review-attempts/${attempt.id}`, process.env.NEXT_PUBLIC_APP_URL ?? "https://octopus-review.ai").href;
+    const summary = reviewAssessmentComplete(coverage) && coverage.assessment?.state === "completed"
+      ? formatGitHubReviewSummary({ coverage, attemptId: attempt.id, headSha: pr.headSha, prTitle: pr.title, presentationBody: stripDetailedFindings(stripReviewReasoningArtifacts(attempt.reviewBody)), findings: archivedFindings, reviewHistoryUrl })
+      : formatInvalidAssessmentSummary({ coverage, attemptId: attempt.id, headSha: pr.headSha, reviewHistoryUrl });
     if (await outcomeRecord.publish(() => publishReviewSummary({ pullRequestId: pr.id, headSha: pr.headSha, reviewRequestVersion: pr.reviewRequestVersion,
-      installationId, owner, repo: repoName, prNumber: pr.number, body, expectedReviewBody: attempt.reviewBody })) === null) return;
+      installationId, owner, repo: repoName, prNumber: pr.number, body: summary, expectedReviewBody: attempt.reviewBody })) === null) return;
     if (coverage.nativeCheckId) {
       // Attempts archived before the decision was kept fall back to the saved findings.
       const severities = coverage.nativeCheckDecision ? [] : (await prisma.reviewIssue.findMany({ where: { pullRequestId: pr.id }, select: { severity: true } })).map(issue => issue.severity);
@@ -851,7 +856,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
 
   const publishMainComment = (body: string, expectedReviewBody?: string, publishedAttemptId = attemptId, publicationWindow?: ReviewExecutionWindow) => isGitHub
     ? publishReviewSummary({ pullRequestId: pr.id, headSha: pr.headSha, reviewRequestVersion: pr.reviewRequestVersion,
-      installationId: installationId!, owner, repo: repoName, prNumber: pr.number, body: attemptLabel(publishedAttemptId) + body, expectedReviewBody, executionWindow: publicationWindow, onPosted: () => { if (recordReviewMain) outcomeRecord.mainPosted(); } })
+      installationId: installationId!, owner, repo: repoName, prNumber: pr.number, body, expectedReviewBody, executionWindow: publicationWindow, onPosted: () => { if (recordReviewMain) outcomeRecord.mainPosted(); } })
     : createReviewAttemptComment(pr.id, pr.headSha, pr.reviewRequestVersion, () => providerCreateComment(pr.number, body, publishedAttemptId, publicationWindow));
 
   const providerUpdateComment = async (commentId: number, body: string, publishedAttemptId = attemptId, publicationWindow?: ReviewExecutionWindow) => {

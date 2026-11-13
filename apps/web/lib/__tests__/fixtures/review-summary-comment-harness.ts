@@ -81,7 +81,8 @@ current = { ...current, headSha: nextHead, reviewRequestVersion: 2, status: "rev
 const newer = { ...target, headSha: nextHead, reviewRequestVersion: 2 };
 await publishReviewSummary({ ...newer, body: "Review in progress" });
 assert.equal(calls.at(-1)?.id, 100);
-assert.equal(calls.at(-1)?.body, `Review in progress\n\nReview history: https://octopus-review.ai/review-attempts/${archived[0].id}`);
+const base = process.env.NEXT_PUBLIC_APP_URL ?? "https://octopus-review.ai";
+assert.equal(calls.at(-1)?.body, `Review in progress\n\nReview history: ${base}/review-attempts/${archived[0].id}`);
 assert.deepEqual(archived, before);
 const count = calls.length;
 assert.equal(await publishReviewSummary(target), null);
