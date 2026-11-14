@@ -6,10 +6,12 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@octopus/db";
 import {
   addCommentReaction,
+  createPullRequestComment,
   getPullRequestDetails,
   createCheckRun,
   updateCheckRun,
 } from "@/lib/github";
+import { handleReviewCancelCommand } from "@/lib/review-cancellation";
 import { startReviewFlow } from "@/lib/webhook-shared";
 import { getGithubAppConfig } from "@/lib/github-app-config";
 import { syncOrgRepos, applyRepositoryEvent } from "@/lib/repo-sync";
@@ -18,6 +20,9 @@ import {
   resolveGithubWebhookTenant,
   type GithubWebhookTenantResolution,
 } from "@/lib/webhook-tenant";
+
+/** `@octopus cancel`, `@octopusreview: cancel`, `@octopus-review, cancel` */
+const CANCEL_COMMAND = /@octopus(?:review|-review)?\b[\s:,-]*cancel\b/i;
 
 type ResolvedGithubWebhookTenant = GithubWebhookTenantResolution & {
   status: "resolved";
@@ -483,6 +488,27 @@ export async function POST(request: NextRequest) {
         console.log(`[webhook] PR details fetched — title: "${prTitle}", author: ${prAuthor}, sha: ${headSha.slice(0, 7)}`);
       } catch (err) {
         console.warn("[webhook] Failed to fetch PR details, using payload fallback:", err);
+      }
+
+      // @octopus cancel: authorize against repository permissions, persist the
+      // cancellation before acknowledging, and never start a review.
+      if (CANCEL_COMMAND.test(commentBody)) {
+        const cancel = await handleReviewCancelCommand({
+          installationId,
+          owner,
+          repoName,
+          repoId: repo.id,
+          prNumber,
+          prHeadSha: headSha || null,
+          commentAuthor: payload.comment?.user?.login ?? "",
+          authorAssociation: payload.comment?.author_association ?? null,
+        });
+        await createPullRequestComment(installationId, owner, repoName, prNumber, cancel.body)
+          .catch((err) => console.error("[webhook] Failed to acknowledge cancellation:", err));
+        addCommentReaction(installationId, owner, repoName, commentId, cancel.authorized ? "+1" : "confused")
+          .catch((err) => console.error("[webhook] Failed to add cancellation reaction:", err));
+        console.log(`[webhook] @octopus cancel handled — authorized: ${cancel.authorized}, outcome: ${cancel.outcome?.outcome ?? "unauthorized"}`);
+        return NextResponse.json({ ok: true });
       }
 
       // Add 👀 reaction to the comment

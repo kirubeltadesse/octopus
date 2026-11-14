@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import { prisma, type Prisma } from "@octopus/db";
 import { withForgejoPublication } from "@/lib/forgejo-connector";
 import { applyReviewCoverage, unknownReviewCoverage, type ReviewCoverage } from "@/lib/review-coverage";
+import { REVIEW_CANCELLED_STATUS } from "@/lib/review-status-state";
 
 export async function updateCurrentReview(pullRequestId: string, headSha: string | null, reviewRequestVersion: number | undefined, data: Prisma.PullRequestUpdateManyMutationInput, expectedReviewBody?: string) {
   if (!headSha || !isReviewRequestVersion(reviewRequestVersion)) return { count: 0 };
@@ -100,7 +101,12 @@ export async function saveReviewAttempt(
       return false;
     }
     if (!coverage.headSha || !isReviewRequestVersion(coverage.reviewRequestVersion)) return false;
-    const promoted = await tx.pullRequest.updateMany({ where: { id: pullRequestId, headSha: coverage.headSha, reviewRequestVersion: coverage.reviewRequestVersion }, data: {
+    // A cancelled request keeps its terminal status: the attempt is still
+    // archived for history, but it must never be promoted or published.
+    const promoted = await tx.pullRequest.updateMany({ where: {
+      id: pullRequestId, headSha: coverage.headSha, reviewRequestVersion: coverage.reviewRequestVersion,
+      status: { not: REVIEW_CANCELLED_STATUS },
+    }, data: {
       status: "completed", reviewBody, reviewCoverage: coverageJson, errorMessage: null,
     } });
     if (!promoted.count) return false;

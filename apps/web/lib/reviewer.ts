@@ -69,6 +69,7 @@ import { prepareRecoveredReviewPresentation, prepareReviewPresentation, mapRevie
 import { formatGitHubReviewSummary, formatInvalidAssessmentSummary } from "@/lib/review-github-summary";
 import { executeCoveredReview, executeFindingsRecovery, recordNoModelAssessment, markReviewAssessmentIncomplete } from "@/lib/review-assessment";
 import { saveReviewAttempt, createReviewAttemptComment, updateCurrentReview, withForgejoReviewPublication, recordFirstReviewCompletion, recordInterruptedAttempt } from "@/lib/review-attempt";
+import { createReviewCancellationWatcher, isReviewRequestCancelled } from "@/lib/review-cancellation";
 import { deliverReviewAttempt } from "@/lib/review-attempt-delivery";
 import { publishReviewSummary } from "@/lib/review-summary-comment";
 import type { ReviewComment } from "@/lib/github";
@@ -767,6 +768,18 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
     return;
   }
   console.log(`[reviewer] PR ${pullRequestId} claimed by server '${serverId}'`);
+
+  // The webhook and review workers are separate processes, so cancellation is
+  // persisted and polled here. Aborting the shared window stops the provider
+  // request where it supports cancellation and fences every later step.
+  const cancellation = createReviewCancellationWatcher({
+    pullRequestId,
+    headSha: pr.headSha,
+    reviewRequestVersion: pr.reviewRequestVersion,
+  });
+  if (executionWindow) {
+    executionWindow = { ...executionWindow, signal: AbortSignal.any([executionWindow.signal, cancellation.signal]) };
+  }
 
   const repo = pr.repository;
   const org = repo.organization;
@@ -2530,6 +2543,10 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
     coverage.nativeCheckDecision = { fail: shouldFailReviewCheck({ hasCritical, hasHigh, hasMedium }, threshold), findings: effectiveFindingsCount };
     const promoted = await saveReviewAttempt(attemptId, pr.id, coverage, effectiveReviewBody, mergedIssues);
     attemptSaved = true;
+    if (await isReviewRequestCancelled(pr.id, pr.headSha, pr.reviewRequestVersion)) {
+      console.log(`[reviewer] Review cancelled before publication; archived attempt ${attemptId} without publishing`);
+      return;
+    }
 
     // The public GitHub comment is derived deterministically from the final
     // validated findings and the immutable archive. The full report stays in
@@ -2589,7 +2606,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
     const summaryText = checkResult.summary;
 
     assertProcessingActive();
-    if (checkRunId && isGitHub && installationId) {
+    if (checkRunId && isGitHub && installationId && !await isReviewRequestCancelled(pr.id, pr.headSha, pr.reviewRequestVersion)) {
       const conclusion = checkResult.conclusion;
       await ghUpdateCheckRun(installationId, owner, repoName, checkRunId, conclusion, {
         title: checkResult.title,
@@ -2710,6 +2727,10 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
 
     console.log(`[reviewer] Review completed for PR #${pr.number}`);
   } catch (err) {
+    if (await isReviewRequestCancelled(pr.id, pr.headSha, pr.reviewRequestVersion).catch(() => false)) {
+      console.log(`[reviewer] Review cancelled; suppressing failure handling for PR #${pr.number}`);
+      return;
+    }
     const reportingError = err;
     const cancelled = isReviewCancelled(executionWindow);
     if (adaptiveProcessingWindow
@@ -2832,6 +2853,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
     });
   }
   } finally {
+    cancellation.stop();
     if (outcomeDeferred) await deferReviewOutcome(outcomeKey);
     else if (!outcomeHandedOff) {
       outcomeRecord.assessment(attemptCoverage, outcomeArchiveId);

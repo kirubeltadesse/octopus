@@ -1,6 +1,6 @@
 import "server-only";
 import { ReviewOutcomeRecorder, startReviewOutcome } from "@/lib/review-attempt-outcome";
-import { isReviewRequestVersion } from "@/lib/review-status-state";
+import { isReviewCancelledStatus, isReviewRequestVersion } from "@/lib/review-status-state";
 import { createHash, randomUUID } from "node:crypto";
 import { deliverReviewAttempt } from "@/lib/review-attempt-delivery";
 import { saveReviewAttempt, updateCurrentReview, hasReviewAttempt, recordFirstReviewCompletion } from "@/lib/review-attempt";
@@ -201,8 +201,9 @@ export async function handleLargeReviewResult(
   }
   const stillCurrent = async () => {
     if (!correlated || !isReviewRequestVersion(coverage.reviewRequestVersion)) return false;
-    const latest = await prisma.pullRequest.findUnique({ where: { id: pr.id }, select: { headSha: true, reviewRequestVersion: true, reviewBody: true } });
-    const current = latest?.headSha === coverage.headSha && latest.reviewRequestVersion === coverage.reviewRequestVersion && latest.reviewBody === reviewBody;
+    const latest = await prisma.pullRequest.findUnique({ where: { id: pr.id }, select: { headSha: true, reviewRequestVersion: true, reviewBody: true, status: true } });
+    const current = latest?.headSha === coverage.headSha && latest.reviewRequestVersion === coverage.reviewRequestVersion && latest.reviewBody === reviewBody
+      && !isReviewCancelledStatus(latest?.status);
     if (!current) outcomeRecord.superseded();
     return current;
   };

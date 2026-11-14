@@ -61,11 +61,16 @@ const db = {
       return [{ ...current, id: "pr", headSha: currentHead, reviewRequestVersion: currentVersion, number: 1, createdAt: new Date("2026-09-11T00:00:00Z") }];
     },
     findUnique: async () => ({ ...current, id: "pr", headSha: currentHead, reviewRequestVersion: currentVersion, number: 1, updatedAt: currentUpdatedAt, repository: { id: "repo", provider: "github", fullName: "owner/repo", installationId: 123, organization: { id: "owner-org" } } }),
-    updateMany: async ({ data, where }: { data: Record<string, unknown>; where: { headSha?: string; reviewRequestVersion?: number; reviewBody?: string; status?: string; firstReviewCompletedAt?: null } }) => {
+    updateMany: async ({ data, where }: { data: Record<string, unknown>; where: { headSha?: string; reviewRequestVersion?: number; reviewBody?: string; status?: string | { not: string }; firstReviewCompletedAt?: null } }) => {
       if (where.reviewRequestVersion !== undefined && where.reviewRequestVersion !== currentVersion) return { count: 0 };
       if (where.headSha && where.headSha !== currentHead) return { count: 0 };
       if (where.reviewBody !== undefined && current.reviewBody !== where.reviewBody) return { count: 0 };
-      if (where.status !== undefined && current.status !== where.status) return { count: 0 };
+      if (where.status !== undefined) {
+        const statusMatches = typeof where.status === "string"
+          ? current.status === where.status
+          : current.status !== where.status.not;
+        if (!statusMatches) return { count: 0 };
+      }
       if (where.firstReviewCompletedAt === null && current.firstReviewCompletedAt != null) return { count: 0 };
       current = { ...current, ...structuredClone(data) };
       return { count: 1 };
@@ -720,3 +725,15 @@ assert.ok(malformedPublications.every(call => !String(call[4]).includes("Claims 
 assert.ok(malformedPublications.some(call => String(call[4]).includes("No unvalidated findings are shown")), "malformed findings publish the concise failure summary");
 assert.deepEqual(issues, [issue("prior finding")], "malformed findings do not wipe prior triage state");
 console.log("PASS large-review accepts empty findings arrays and never gates on malformed findings");
+
+// Late worker completion: an archived attempt never promotes a cancelled request.
+{
+  const lateAttempt = "26262626-2626-4626-8626-262626262626";
+  const beforeBody = current.reviewBody;
+  current.status = "cancelled";
+  assert.equal(await saveReviewAttempt(lateAttempt, "pr", coverage, "Late cancelled report"), false);
+  assert.equal(current.status, "cancelled");
+  assert.equal(current.reviewBody, beforeBody);
+  assert.equal(rows.get(lateAttempt)?.reviewBody, "Late cancelled report");
+}
+console.log("PASS cancelled request archives late work without promotion");

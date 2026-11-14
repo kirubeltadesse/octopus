@@ -2,9 +2,16 @@ import { beforeEach, describe, expect, it, mock } from "bun:test";
 
 mock.module("server-only", () => ({}));
 
-let orphans: Array<{ id: string; createdAt: Date; status: string; updatedAt: Date; reviewRequestVersion: number }> = [];
+type Orphan = {
+  id: string; createdAt: Date; status: string; updatedAt: Date; reviewRequestVersion: number;
+  reviewAttemptId?: string | null; headSha?: string | null;
+  repository?: { provider: string; fullName?: string; installationId?: number; organization?: { githubInstallationId?: number } };
+};
+let orphans: Orphan[] = [];
+let unsettled: Orphan[] = [];
 let updateCount = 1;
-const findMany = mock(async () => orphans);
+const findMany = mock(async ({ where }: { where?: { status?: { in?: string[] } } } = {}) =>
+  where?.status?.in ? unsettled : orphans);
 const updateMany = mock(async () => ({ count: updateCount }));
 mock.module("@octopus/db", () => ({
   prisma: { pullRequest: { findMany, updateMany }, $transaction: (run: (tx: unknown) => unknown) => run({ pullRequest: { updateMany } }) },
@@ -21,6 +28,13 @@ mock.module("@/lib/queue", () => ({
   computeStaleReclaimMs: (s: number) => (s + 300) * 1000,
 }));
 
+let failReconcile = false;
+const reconcile = mock(async () => {
+  if (failReconcile) throw new Error("503 from GitHub");
+  return true;
+});
+mock.module("@/lib/review-check-reconciliation", () => ({ reconcileReviewCheck: reconcile }));
+
 const { reapStuckReviews, REAP_FAILED_MESSAGE } = await import(
   "@/lib/reap-stuck-reviews"
 );
@@ -28,15 +42,22 @@ const { reapStuckReviews, REAP_FAILED_MESSAGE } = await import(
 const NOW = new Date("2026-08-06T13:00:00.000Z");
 const minutesAgo = (m: number) => new Date(NOW.getTime() - m * 60 * 1000);
 const daysAgo = (d: number) => new Date(NOW.getTime() - d * 24 * 60 * 60 * 1000);
-const orphan = (id: string, createdAt: Date) => ({ id, createdAt, status: "reviewing", updatedAt: minutesAgo(30), reviewRequestVersion: 1 });
+const orphan = (id: string, createdAt: Date): Orphan => ({ id, createdAt, status: "reviewing", updatedAt: minutesAgo(30), reviewRequestVersion: 1 });
+const githubOrphan = (id: string, status = "reviewing"): Orphan => ({
+  ...orphan(id, minutesAgo(30)), status, headSha: "a".repeat(40),
+  repository: { provider: "github", fullName: "owner/repo", installationId: 123, organization: { githubInstallationId: 123 } },
+});
 
 describe("reapStuckReviews", () => {
   beforeEach(() => {
     orphans = [];
+    unsettled = [];
     updateCount = 1;
+    failReconcile = false;
     findMany.mockClear();
     updateMany.mockClear();
     enqueue.mockClear();
+    reconcile.mockClear();
   });
 
   it("marks a recent orphan failed and re-queues exactly one throttled retry", async () => {
@@ -67,6 +88,52 @@ describe("reapStuckReviews", () => {
     updateCount = 0;
     const res = await reapStuckReviews(NOW);
     expect(res).toEqual({ requeued: 0, failed: 0 });
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("marks an orphaned GitHub check as timed_out", async () => {
+    orphans = [githubOrphan("pr_gh", "reviewing")];
+    await reapStuckReviews(NOW);
+    expect(reconcile).toHaveBeenCalledWith({
+      installationId: 123, fullName: "owner/repo", headSha: "a".repeat(40),
+      pullRequestId: "pr_gh", reviewRequestVersion: 1, conclusion: "timed_out",
+    });
+  });
+
+  it("does not requeue or reconcile an explicitly cancelled request", async () => {
+    // The row was cancelled after selection, so the optimistic update matches nothing.
+    orphans = [githubOrphan("pr_cancelled", "reviewing")];
+    updateCount = 0;
+    const res = await reapStuckReviews(NOW);
+    expect(res).toEqual({ requeued: 0, failed: 0 });
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
+  it("retries a check PATCH that failed transiently on a later sweep", async () => {
+    orphans = [githubOrphan("pr_retry", "reviewing")];
+    failReconcile = true;
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      await reapStuckReviews(NOW);
+    } finally {
+      console.warn = warn;
+    }
+    expect(reconcile).toHaveBeenCalledTimes(1);
+
+    failReconcile = false;
+    orphans = [];
+    unsettled = [githubOrphan("pr_retry", "failed")];
+    await reapStuckReviews(new Date(NOW.getTime() + 5 * 60 * 1000));
+    expect(reconcile).toHaveBeenCalledTimes(2);
+    expect(reconcile).toHaveBeenLastCalledWith(expect.objectContaining({ pullRequestId: "pr_retry", conclusion: "timed_out" }));
+  });
+
+  it("reconciles a cancelled check as cancelled and never re-queues it", async () => {
+    unsettled = [githubOrphan("pr_cancel", "cancelled")];
+    await reapStuckReviews(NOW);
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ pullRequestId: "pr_cancel", conclusion: "cancelled" }));
     expect(enqueue).not.toHaveBeenCalled();
   });
 });

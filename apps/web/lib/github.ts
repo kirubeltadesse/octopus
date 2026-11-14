@@ -342,6 +342,82 @@ export async function getPullRequestDetails(
   };
 }
 
+/**
+ * The comment author's repository permission, used to authorize destructive
+ * commands. Returns null when the App lacks the Administration permission or
+ * the lookup fails; callers fall back to the signed webhook association.
+ */
+export async function getCollaboratorPermission(
+  installationId: number,
+  owner: string,
+  repo: string,
+  username: string,
+): Promise<string | null> {
+  if (!username) return null;
+  try {
+    const token = await getInstallationToken(installationId);
+    const res = await fetchWithRetry(
+      `${GITHUB_API}/repos/${owner}/${repo}/collaborators/${encodeURIComponent(username)}/permission`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" } },
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as { permission?: unknown };
+    return typeof data.permission === "string" ? data.permission : null;
+  } catch {
+    return null;
+  }
+}
+
+type GitHubCheckRun = {
+  id: number;
+  status: string;
+  conclusion?: string | null;
+  external_id?: string | null;
+  app?: { id: number } | null;
+};
+
+/** List all check runs for a commit/name, newest page first. Throws on API failure. */
+async function listCheckRuns(
+  installationId: number,
+  owner: string,
+  repo: string,
+  headSha: string,
+  name: string,
+): Promise<GitHubCheckRun[]> {
+  const token = await getInstallationToken(installationId);
+  const runs: GitHubCheckRun[] = [];
+  for (let page = 1; ; page++) {
+    const res = await fetchWithRetry(
+      `${GITHUB_API}/repos/${owner}/${repo}/commits/${headSha}/check-runs?check_name=${encodeURIComponent(name)}&filter=all&per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" } },
+    );
+    if (!res.ok) throw new Error(`Failed to list check runs: ${res.status}`);
+    const data = (await res.json()) as { check_runs?: GitHubCheckRun[] };
+    const batch = data.check_runs ?? [];
+    runs.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return runs;
+}
+
+/**
+ * Find this App's check run for one review request. Returns null when no run
+ * exists; throws on API failure so a reconciliation sweep can retry.
+ */
+export async function findCheckRunByExternalId(
+  installationId: number,
+  owner: string,
+  repo: string,
+  headSha: string,
+  name: string,
+  externalId: string,
+): Promise<GitHubCheckRun | null> {
+  const config = await getGithubAppConfig();
+  if (!config) throw new Error("GitHub App is not configured for check reconciliation");
+  const runs = await listCheckRuns(installationId, owner, repo, headSha, name);
+  return runs.find(run => String(run.app?.id) === String(config.appId) && run.external_id === externalId) ?? null;
+}
+
 export async function createCheckRun(
   installationId: number,
   owner: string,
@@ -400,7 +476,7 @@ export async function updateCheckRun(
   owner: string,
   repo: string,
   checkRunId: number,
-  conclusion: "success" | "failure" | "neutral",
+  conclusion: "success" | "failure" | "neutral" | "cancelled" | "timed_out",
   output: { title: string; summary: string },
   executionWindow?: ReviewExecutionWindow,
 ): Promise<void> {

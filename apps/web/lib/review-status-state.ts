@@ -33,3 +33,8 @@ export function applyReviewStatus<T extends ReviewState>(state: Record<string, T
     pr.id === event.pullRequestId && pr.number === event.number && pr.headSha === event.headSha && pr.reviewRequestVersion === event.reviewRequestVersion ? { ...pr, status: event.status } : pr,
   ) };
 }
+
+/** A user-cancelled review request. Terminal until the next request resets the row to pending. */
+export const REVIEW_CANCELLED_STATUS = "cancelled";
+export const REVIEW_CANCELLED_MESSAGE = "Review cancelled by @octopus cancel";
+export const isReviewCancelledStatus = (status: string | null | undefined): boolean => status === REVIEW_CANCELLED_STATUS;

@@ -232,6 +232,29 @@ export async function enqueue<T extends object>(
   return getBoss().send(name, data, options);
 }
 
+/**
+ * Best-effort cancellation of not-yet-running review jobs for one pull request.
+ * Active jobs keep running (pg-boss cannot abort a handler) and are fenced by
+ * the persisted cancellation status instead. Returns the number cancelled.
+ */
+export async function cancelQueuedReviewJobs(pullRequestId: string): Promise<number> {
+  if (!started) await startQueue();
+  const boss = getBoss();
+  let cancelled = 0;
+  for (const queue of ["process-review", "process-large-review", "post-large-review-result"]) {
+    try {
+      const jobs = await boss.findJobs<{ pullRequestId: string }>(queue, { data: { pullRequestId } });
+      const ids = jobs.filter(job => job.state === "created" || job.state === "retry").map(job => job.id);
+      if (ids.length === 0) continue;
+      await boss.cancel(queue, ids);
+      cancelled += ids.length;
+    } catch (error) {
+      console.warn(`[queue] Failed to cancel queued ${queue} jobs for ${pullRequestId}:`, error instanceof Error ? error.message : "unknown error");
+    }
+  }
+  return cancelled;
+}
+
 export async function enqueueAfter<T extends object>(
   name: string,
   data: T,

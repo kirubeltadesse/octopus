@@ -1,6 +1,6 @@
 import "server-only";
 import { prisma, type Prisma } from "@octopus/db";
-import { isReviewRequestVersion } from "@/lib/review-status-state";
+import { isReviewCancelledStatus, isReviewRequestVersion } from "@/lib/review-status-state";
 import { createPullRequestComment, updatePullRequestComment, getInstallationToken, findPullRequestSummaryComment } from "@/lib/github";
 
 import { assertReviewProcessingActive, reviewPublicationSignal, type ReviewExecutionWindow } from "./review-capacity";
@@ -44,7 +44,9 @@ export async function publishReviewSummary(target: SummaryTarget): Promise<numbe
         }[]>`SELECT "headSha", "reviewRequestVersion", "reviewCommentId", "reviewBody", status
              FROM pull_requests WHERE id = ${target.pullRequestId} FOR UPDATE`;
         if (!current || current.headSha !== target.headSha || current.reviewRequestVersion !== target.reviewRequestVersion
-          || (target.expectedReviewBody !== undefined && current.reviewBody !== target.expectedReviewBody)) return null;
+          || (target.expectedReviewBody !== undefined && current.reviewBody !== target.expectedReviewBody)
+          // A cancelled request cannot publish progress or a final result.
+          || isReviewCancelledStatus(current.status)) return null;
         if (target.expectedReviewBody === undefined && current.status === "completed") return null;
 
         const attempts = await tx.reviewAttempt.findMany({
