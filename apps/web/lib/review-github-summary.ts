@@ -39,9 +39,68 @@ export type GitHubReviewSummaryInput = {
   reviewHistoryUrl?: string | null;
   reReview?: boolean;
   resolvedCount?: number;
+  /** Existing check conclusion; the merge verdict comes from this, not the score. */
+  checkConclusion?: CheckConclusion;
 };
 
 export type AgentPromptDetail = "full" | "compact" | "minimal";
+export type CheckConclusion = "success" | "failure" | "neutral" | "cancelled" | "timed_out";
+export type ReviewVerdict = "Ready to merge" | "Changes required" | "Not assessed" | "No review required";
+
+/** Unescaped pipe splitting, matching the review score table parser. */
+function tableCells(line: string): string[] {
+  const cells: string[] = []; let start = 0; let slashes = 0;
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === "|" && slashes % 2 === 0) { cells.push(line.slice(start, i)); start = i + 1; }
+    slashes = line[i] === "\\" ? slashes + 1 : 0;
+  }
+  cells.push(line.slice(start)); return cells;
+}
+
+/**
+ * The reconciled Overall quality rating from the archived ### Score table.
+ * Returns null for a missing, malformed or "Not assessed" row.
+ */
+export function extractOverallScore(body: string | null | undefined): number | null {
+  if (!body) return null;
+  const section = /^### Score[ \t]*\r?\n([\s\S]*?)(?=^#{1,6}[ \t]|(?![\s\S]))/m.exec(body)?.[1] ?? "";
+  const rows = section.split(/\r?\n/).filter(line => line.trimStart().startsWith("|")
+    && tableCells(line)[1]?.trim().replaceAll("**", "") === "Overall");
+  // Exactly one Overall row is required; a duplicate or malformed row is not a
+  // usable overall quality rating.
+  if (rows.length !== 1) return null;
+  const cells = tableCells(rows[0]);
+  if (cells.length !== 5) return null;
+  const token = cells[2]?.trim().replaceAll("**", "") ?? "";
+  const match = /^([1-5])\s*\/\s*5$/.exec(token);
+  return match ? Number(match[1]) : null;
+}
+
+/** Merge readiness comes from the assessment and check conclusion, never the score. */
+export function reviewVerdict(coverage: ReviewCoverage, conclusion: CheckConclusion): ReviewVerdict {
+  if (reviewAssessmentComplete(coverage) && coverage.assessment?.state === "not-required") return "No review required";
+  if (!reviewAssessmentComplete(coverage) || coverage.assessment?.state !== "completed") return "Not assessed";
+  return conclusion === "failure" ? "Changes required" : "Ready to merge";
+}
+
+export function formatReviewScore(score: number | null): string {
+  return score === null ? "N/A" : `${score}/5`;
+}
+
+/** Compact check-run output title, e.g. "4/5 · Ready to merge". */
+export function formatCheckTitle(score: number | null, verdict: ReviewVerdict): string {
+  return `${formatReviewScore(score)} · ${verdict}`;
+}
+
+export function formatCheckRunTitle(input: {
+  coverage: ReviewCoverage;
+  conclusion: CheckConclusion;
+  score?: number | null;
+}): string {
+  const assessed = reviewAssessmentComplete(input.coverage) && input.coverage.assessment?.state === "completed";
+  return formatCheckTitle(assessed ? input.score ?? null : null, reviewVerdict(input.coverage, input.conclusion));
+}
+
 
 /** Remove reasoning tags/fences without touching code formatting. */
 export function stripReasoningTags(text: string): string {
@@ -225,7 +284,11 @@ export function formatFixWithAgentPrompt(
 }
 
 type DocumentParts = {
-  verdict: string;
+  /** Finding disposition shown in the detail line. */
+  findingVerdict: string;
+  /** Merge disposition derived from the assessment and check conclusion. */
+  mergeVerdict: ReviewVerdict;
+  score: number | null;
   status: string;
   headSha: string | null;
   summary: string;
@@ -235,9 +298,9 @@ type DocumentParts = {
 
 function renderHeader(p: DocumentParts): string[] {
   return [
-    "## 🐙 Octopus Review",
+    `## 🐙 Octopus Review — ${formatCheckTitle(p.score, p.mergeVerdict)}`,
     "",
-    `**Verdict:** ${p.verdict}`,
+    `**Verdict:** ${p.findingVerdict}`,
     `**Status:** ${p.status}`,
     p.headSha
       ? `**Reviewed commit:** \`${p.headSha}\` · ${historyLink(p.historyUrl)}`
@@ -327,7 +390,7 @@ export function formatFailureSummary(input: {
     : " Complete Review History is available from the review record.";
   const head = input.headSha ? ` Reviewed commit: \`${input.headSha}\`.` : "";
   return [
-    "## 🐙 Octopus Review",
+    "## 🐙 Octopus Review — N/A · Not assessed",
     "",
     "**Verdict:** Assessment unavailable",
     `**Status:** ${status}${head}`,
@@ -354,7 +417,9 @@ export function formatGitHubReviewSummary(input: GitHubReviewSummaryInput): stri
     // "not-required" is a valid, non-failing outcome; everything else is invalid.
     if (reviewAssessmentComplete(coverage) && coverage.assessment?.state === "not-required") {
       return renderDocument({
-        verdict: "No review required",
+        findingVerdict: "No review required",
+        mergeVerdict: "No review required",
+        score: null,
         status: coverageSummary(coverage),
         headSha: input.headSha,
         summary: "No changed paths in this pull request require review under the repository policy.",
@@ -366,8 +431,12 @@ export function formatGitHubReviewSummary(input: GitHubReviewSummaryInput): stri
   }
 
   const findings = sortFindings(sanitizeFindings(input.findings));
+  const conclusion: CheckConclusion = input.checkConclusion
+    ?? (findings.some((f) => f.severity === "🔴") ? "failure" : "success");
   return fitDocument({
-    verdict: verdictFor(findings),
+    findingVerdict: verdictFor(findings),
+    mergeVerdict: reviewVerdict(coverage, conclusion),
+    score: extractOverallScore(input.presentationBody),
     status: `${coverageSummary(coverage)}${input.reReview && input.resolvedCount ? ` (${input.resolvedCount} resolved)` : ""}`,
     headSha: input.headSha,
     summary: extractPrSummary(input.presentationBody, input.prTitle),
@@ -392,7 +461,11 @@ export function formatLargeReviewSummary(input: LargeReviewSummaryInput): string
   const findings = sortFindings(sanitizeFindings(input.findings));
   const title = stripReasoningArtifacts(input.prTitle ?? "").replace(/\s+/g, " ").trim();
   return fitDocument({
-    verdict: verdictFor(findings),
+    findingVerdict: verdictFor(findings),
+    // The large pipeline has no verified coverage assessment or validated
+    // overall score, so it must not imply the PR is ready to merge.
+    mergeVerdict: "Not assessed",
+    score: null,
     status: "Large-PR review · no inline comments · changed-file coverage not verified",
     headSha: input.headSha,
     summary: title

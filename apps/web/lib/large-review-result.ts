@@ -14,7 +14,7 @@ import {
 } from "@/lib/github";
 import { parseFindingsFromJson } from "@/lib/review-dedup";
 import { parseReviewFindingsSet } from "@/lib/review-evidence";
-import { formatFailureSummary, formatLargeReviewSummary } from "@/lib/review-github-summary";
+import { formatCheckRunTitle, formatFailureSummary, formatLargeReviewSummary } from "@/lib/review-github-summary";
 import { findingSignature, mergeFindingsBySignature, inheritReviewIssueTriage } from "@/lib/finding-merge";
 import {
   buildLowSeveritySummary,
@@ -196,7 +196,9 @@ export async function handleLargeReviewResult(
   if (coverage.nativeCheckId) {
     const result = reviewCheckResult(coverage, false, 0);
     await ghUpdateCheckRun(installationId, owner, repoName, Number(coverage.nativeCheckId), result.conclusion, {
-      title: result.title, summary: result.summary,
+      // The large pipeline has no verified coverage/score, so the title shows N/A.
+      title: formatCheckRunTitle({ coverage, conclusion: result.conclusion }),
+      summary: result.summary,
     });
   }
   const stillCurrent = async () => {

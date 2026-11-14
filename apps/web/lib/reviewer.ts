@@ -66,7 +66,7 @@ import { prepareReviewComment } from "@/lib/review-comment-context";
 import { createCoveredReviewRequest } from "@/lib/review-request";
 import { canRestrictReviewToFollowUp } from "@/lib/review-follow-up";
 import { prepareRecoveredReviewPresentation, prepareReviewPresentation, mapReviewPresentation, enforceReviewFindingsIntegrity, finalizeReviewPresentation, stripReviewReasoningArtifacts } from "@/lib/review-presentation";
-import { formatGitHubReviewSummary, formatInvalidAssessmentSummary } from "@/lib/review-github-summary";
+import { extractOverallScore, formatCheckRunTitle, formatGitHubReviewSummary, formatInvalidAssessmentSummary } from "@/lib/review-github-summary";
 import { executeCoveredReview, executeFindingsRecovery, recordNoModelAssessment, markReviewAssessmentIncomplete } from "@/lib/review-assessment";
 import { saveReviewAttempt, createReviewAttemptComment, updateCurrentReview, withForgejoReviewPublication, recordFirstReviewCompletion, recordInterruptedAttempt } from "@/lib/review-attempt";
 import { createReviewCancellationWatcher, isReviewRequestCancelled } from "@/lib/review-cancellation";
@@ -676,19 +676,22 @@ export async function processReview(pullRequestId: string, executionWindow?: Rev
     // The comment is derived from the archived report; the check uses the findings saved with it.
     const archivedFindings = parseFindings(attempt.reviewBody);
     const reviewHistoryUrl = new URL(`/review-attempts/${attempt.id}`, process.env.NEXT_PUBLIC_APP_URL ?? "https://octopus-review.ai").href;
+    // Attempts archived before the decision was kept fall back to the saved findings.
+    const severities = coverage.nativeCheckDecision ? [] : (await prisma.reviewIssue.findMany({ where: { pullRequestId: pr.id }, select: { severity: true } })).map(issue => issue.severity);
+    const checkResult = reviewCheckResult(coverage, coverage.nativeCheckDecision?.fail ?? shouldFailReviewCheck(
+      { hasCritical: severities.includes("critical"), hasHigh: severities.includes("high"), hasMedium: severities.includes("medium") },
+      repo.organization.checkFailureThreshold || "critical",
+    ), coverage.nativeCheckDecision?.findings ?? severities.length);
     const summary = reviewAssessmentComplete(coverage) && coverage.assessment?.state === "completed"
-      ? formatGitHubReviewSummary({ coverage, attemptId: attempt.id, headSha: pr.headSha, prTitle: pr.title, presentationBody: stripDetailedFindings(stripReviewReasoningArtifacts(attempt.reviewBody)), findings: archivedFindings, reviewHistoryUrl })
+      ? formatGitHubReviewSummary({ coverage, attemptId: attempt.id, headSha: pr.headSha, prTitle: pr.title, presentationBody: stripDetailedFindings(stripReviewReasoningArtifacts(attempt.reviewBody)), findings: archivedFindings, reviewHistoryUrl, checkConclusion: checkResult.conclusion })
       : formatInvalidAssessmentSummary({ coverage, attemptId: attempt.id, headSha: pr.headSha, reviewHistoryUrl });
     if (await outcomeRecord.publish(() => publishReviewSummary({ pullRequestId: pr.id, headSha: pr.headSha, reviewRequestVersion: pr.reviewRequestVersion,
       installationId, owner, repo: repoName, prNumber: pr.number, body: summary, expectedReviewBody: attempt.reviewBody })) === null) return;
     if (coverage.nativeCheckId) {
-      // Attempts archived before the decision was kept fall back to the saved findings.
-      const severities = coverage.nativeCheckDecision ? [] : (await prisma.reviewIssue.findMany({ where: { pullRequestId: pr.id }, select: { severity: true } })).map(issue => issue.severity);
-      const result = reviewCheckResult(coverage, coverage.nativeCheckDecision?.fail ?? shouldFailReviewCheck(
-        { hasCritical: severities.includes("critical"), hasHigh: severities.includes("high"), hasMedium: severities.includes("medium") },
-        repo.organization.checkFailureThreshold || "critical",
-      ), coverage.nativeCheckDecision?.findings ?? severities.length);
-      await ghUpdateCheckRun(installationId, owner, repoName, Number(coverage.nativeCheckId), result.conclusion, { title: result.title, summary: result.summary });
+      await ghUpdateCheckRun(installationId, owner, repoName, Number(coverage.nativeCheckId), checkResult.conclusion, {
+        title: formatCheckRunTitle({ coverage, conclusion: checkResult.conclusion, score: extractOverallScore(attempt.reviewBody) }),
+        summary: checkResult.summary,
+      });
     }
     await recordFirstReviewCompletion(pr.id, pr.headSha, pr.reviewRequestVersion, attempt.reviewBody);
     console.log(`[reviewer] Finished the interrupted publication of review attempt ${attempt.id}`);
@@ -1444,7 +1447,10 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
       } finally { recordReviewMain = false; }
       const result = reviewCheckResult(coverage, false, 0);
       if (checkRunId && isGitHub && installationId) {
-        await ghUpdateCheckRun(installationId, owner, repoName, checkRunId, result.conclusion, { title: result.title, summary: result.summary });
+        await ghUpdateCheckRun(installationId, owner, repoName, checkRunId, result.conclusion, {
+          title: formatCheckRunTitle({ coverage, conclusion: result.conclusion }),
+          summary: result.summary,
+        });
       }
       if (pr.headSha && usesProjectApi) {
         await projectProvider.setCommitStatus(org.id, projectPath, pr.headSha, result.conclusion === "success" ? "success" : "failed", COMMIT_STATUS_NAME, result.summary);
@@ -2548,6 +2554,10 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
       return;
     }
 
+    // Merge-gating result, computed once from the existing findings/severity
+    // threshold. It drives both the compact summary verdict and the check run.
+    const finalCheck = reviewCheckResult(coverage, shouldRequestChanges, effectiveFindingsCount);
+
     // The public GitHub comment is derived deterministically from the final
     // validated findings and the immutable archive. The full report stays in
     // the archive; the comment stays short and never reflects raw model output.
@@ -2563,6 +2573,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
         reviewHistoryUrl,
         reReview: isReReview,
         resolvedCount,
+        checkConclusion: finalCheck.conclusion,
       });
     }
 
@@ -2600,23 +2611,20 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
 
     // Merge-gating result, computed once and applied to whichever provider
     // supports a status check (GitHub check-run, GitLab commit status).
-    const checkResult = reviewCheckResult(coverage, shouldFailReviewCheck(
-      { hasCritical, hasHigh, hasMedium }, threshold,
-    ), effectiveFindingsCount);
-    const summaryText = checkResult.summary;
+    const summaryText = finalCheck.summary;
 
     assertProcessingActive();
     if (checkRunId && isGitHub && installationId && !await isReviewRequestCancelled(pr.id, pr.headSha, pr.reviewRequestVersion)) {
-      const conclusion = checkResult.conclusion;
+      const conclusion = finalCheck.conclusion;
       await ghUpdateCheckRun(installationId, owner, repoName, checkRunId, conclusion, {
-        title: checkResult.title,
+        title: formatCheckRunTitle({ coverage, conclusion, score: extractOverallScore(effectiveReviewBody) }),
         summary: summaryText,
       }, completeReviewAdmission?.window);
       console.log(`[reviewer] Check run updated — conclusion: ${conclusion} (threshold: ${threshold})`);
     }
 
     if (pr.headSha && usesProjectApi) {
-      const state = checkResult.conclusion === "failure" ? "failed" : "success";
+      const state = finalCheck.conclusion === "failure" ? "failed" : "success";
       await projectProvider
         .setCommitStatus(org.id, projectPath, pr.headSha, state, COMMIT_STATUS_NAME, summaryText, undefined, completeReviewAdmission?.window)
         .catch((err) => {
@@ -2810,7 +2818,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
         checkRunId,
         "failure",
         {
-          title: attemptCoverage?.assessment?.failure?.stage === "generation" ? "Review generation failed" : "Review failed",
+          title: `N/A · ${attemptCoverage?.assessment?.failure?.stage === "generation" ? "Review generation failed" : "Review failed"}`,
           summary: `${interruptedTwice ?? `Octopus Review encountered an error: ${errorMessage}${failureCode ? "." : ""}`}${failureCode ? ` Attempt: ${failureAttemptId}. Failure code: \`${failureCode}\`.` : ""}`,
         },
       ).catch((e) => console.error("[reviewer] Failed to update check run:", safeErrorDetails(e)));

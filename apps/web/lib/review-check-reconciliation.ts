@@ -25,7 +25,7 @@ export async function reconcileReviewCheck(params: {
   );
   if (!check || check.status === "completed") return true;
   await github.updateCheckRun(params.installationId, owner, repo, check.id, params.conclusion, {
-    title: params.conclusion === "cancelled" ? "Review cancelled" : "Review timed out",
+    title: params.conclusion === "cancelled" ? "N/A · Review cancelled" : "N/A · Review timed out",
     summary: params.conclusion === "cancelled"
       ? "This review request was cancelled."
       : "This review did not finish before its timeout.",
