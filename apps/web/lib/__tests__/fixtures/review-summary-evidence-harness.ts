@@ -51,7 +51,8 @@ assert.ok(published.includes("74/236 files fully supplied, 0 partial, 51 omitted
 assert.ok(published.includes("Overall: not assessed"));
 assert.ok(published.includes("Retained finding"));
 assert.ok(!published.includes("src/file-0.ts"));
-assert.ok(published.includes(`Review history: https://octopus-review.ai/review-attempts/${archives[0].id}`));
+const base = process.env.NEXT_PUBLIC_APP_URL ?? "https://octopus-review.ai";
+assert.ok(published.includes(`Review history: ${base}/review-attempts/${archives[0].id}`));
 assert.ok(!published.includes("Review history (latest") && !published.includes("organization access") && !published.includes("sign-in required"));
 assert.ok(published.includes("Full coverage and review record: https://"));
 assert.ok(calls.every(call => !/<details>|<summary>|<!-- octopus-summary:|\[Full coverage and review record\]/.test(call.body)));

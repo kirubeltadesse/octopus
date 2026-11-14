@@ -1,8 +1,33 @@
 import type { InlineFinding } from "@/lib/review-dedup";
 import { coverageSummary, reviewAssessmentComplete, type ReviewCoverage } from "@/lib/review-coverage";
 
+/**
+ * Deterministic GitHub review presentation.
+ *
+ * The public GitHub comment must stay short, must never expose raw model
+ * reasoning, and must never exceed GitHub's per-comment size cap. Everything
+ * here is derived from already-validated findings and the archived review
+ * record; no additional model request is made.
+ */
+
+/** Mirrors `MAX_GITHUB_COMMENT_BODY` in `github.ts`. */
+export const MAX_GITHUB_COMMENT_CHARS = 64_000;
+/** Leave room for the publisher's reconciliation marker and footer. */
+const SUMMARY_BUDGET = 63_000;
+
 const SEVERITY_ORDER: Record<string, number> = { "🔴": 0, "🟠": 1, "🟡": 2, "🔵": 3, "💡": 4 };
 const SEVERITY_LABEL: Record<string, string> = { "🔴": "Critical", "🟠": "High", "🟡": "Medium", "🔵": "Low", "💡": "Nit" };
+
+const FIELD_LIMITS = {
+  title: 200,
+  category: 60,
+  filePath: 300,
+  description: 1_200,
+  suggestion: 2_000,
+  minimumFixScope: 600,
+  suggestedRegressionTest: 1_200,
+  presentation: 400,
+} as const;
 
 export type GitHubReviewSummaryInput = {
   coverage: ReviewCoverage;
@@ -16,16 +41,91 @@ export type GitHubReviewSummaryInput = {
   resolvedCount?: number;
 };
 
+export type AgentPromptDetail = "full" | "compact" | "minimal";
+
+/** Remove reasoning tags/fences without touching code formatting. */
+export function stripReasoningTags(text: string): string {
+  return text
+    .replace(/<thinking\b[^>]*>[\s\S]*?<\/thinking>/gi, "")
+    .replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, "")
+    .replace(/<thinking\b[^>]*>[\s\S]*$/gi, "")
+    .replace(/<think\b[^>]*>[\s\S]*$/gi, "")
+    .replace(/<\/thinking>/gi, "")
+    .replace(/<\/think>/gi, "")
+    .replace(/```(?:thinking|reasoning)[^\n]*\r?\n[\s\S]*?```/gi, "");
+}
+
+/** Strip leaked model reasoning and normalize prose whitespace. */
 export function stripReasoningArtifacts(text: string): string {
   if (!text) return "";
-  let out = text;
-  out = out.replace(/<thinking\b[^>]*>[\s\S]*?<\/thinking>/gi, "");
-  out = out.replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, "");
-  out = out.replace(/<thinking\b[^>]*>[\s\S]*$/gi, "");
-  out = out.replace(/<think\b[^>]*>[\s\S]*$/gi, "");
-  out = out.replace(/<\/thinking>/gi, "");
-  out = out.replace(/<\/think>/gi, "");
-  return out.replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+  return stripReasoningTags(text)
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/** Slice without bisecting a UTF-16 surrogate pair (GitHub rejects malformed text). */
+function cutSafe(text: string, max: number): string {
+  const cut = text.slice(0, max);
+  return /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
+}
+
+/** Single-line field: strip reasoning, collapse whitespace, cap length. */
+function cleanLine(value: string | null | undefined, max: number): string {
+  return cutSafe(stripReasoningArtifacts(value ?? "").replace(/\s+/g, " ").trim(), max);
+}
+
+/**
+ * Multi-line field (code suggestion / regression test): strip reasoning but
+ * preserve indentation and fences, then cap at a fence boundary.
+ */
+function cleanBlock(value: string | null | undefined, max: number): string {
+  const stripped = stripReasoningTags(value ?? "").trim();
+  if (!stripped) return "";
+  if (stripped.length <= max) return stripped;
+  let cut = cutSafe(stripped, max);
+  // Close an open fence so truncated Markdown stays valid.
+  if (((cut.match(/```/g) ?? []).length) % 2 === 1) cut += "\n```";
+  return `${cut.trimEnd()}…`;
+}
+
+function isKnownSeverity(severity: string | undefined): severity is string {
+  return typeof severity === "string" && Object.prototype.hasOwnProperty.call(SEVERITY_LABEL, severity);
+}
+
+/**
+ * Drop findings that are structurally unusable and sanitize every
+ * model-derived field. Guarantees the formatter never publishes malformed or
+ * reasoning-leaking findings.
+ */
+export function sanitizeFindings(findings: InlineFinding[]): InlineFinding[] {
+  const out: InlineFinding[] = [];
+  for (const f of findings) {
+    if (!f || typeof f !== "object") continue;
+    const severity = typeof f.severity === "string" ? f.severity.trim() : "";
+    if (!isKnownSeverity(severity)) continue;
+    const title = cleanLine(f.title, FIELD_LIMITS.title);
+    const filePath = cleanLine(f.filePath, FIELD_LIMITS.filePath);
+    const startLine = Number.isFinite(f.startLine) ? Math.max(1, Math.trunc(f.startLine)) : 0;
+    if (!title || !filePath || !startLine) continue;
+    const endLine = Number.isFinite(f.endLine) ? Math.max(startLine, Math.trunc(f.endLine)) : startLine;
+    out.push({
+      ...f,
+      severity,
+      title,
+      filePath,
+      startLine,
+      endLine,
+      category: cleanLine(f.category, FIELD_LIMITS.category),
+      description: cleanBlock(f.description, FIELD_LIMITS.description),
+      suggestion: cleanBlock(f.suggestion, FIELD_LIMITS.suggestion),
+      minimumFixScope: f.minimumFixScope ? cleanLine(f.minimumFixScope, FIELD_LIMITS.minimumFixScope) : undefined,
+      suggestedRegressionTest: f.suggestedRegressionTest
+        ? cleanBlock(f.suggestedRegressionTest, FIELD_LIMITS.suggestedRegressionTest)
+        : undefined,
+    });
+  }
+  return out;
 }
 
 function escapeCell(text: string): string {
@@ -36,12 +136,13 @@ function escapeFence(text: string): string {
   return text.replace(/```/g, "``\u200b`");
 }
 
-function verdict(coverage: ReviewCoverage, findings: InlineFinding[]): string {
-  if (!reviewAssessmentComplete(coverage) || coverage.assessment?.state !== "completed") {
-    return "Assessment unavailable";
-  }
-  const hasBlocking = findings.some((f) => f.severity === "🔴" || f.severity === "🟠" || f.severity === "🟡");
+function historyLink(url: string | null | undefined): string {
+  return url ? `[Complete Review History](${url})` : "Complete Review History";
+}
+
+function verdictFor(findings: InlineFinding[]): string {
   if (findings.length === 0) return "No actionable findings";
+  const hasBlocking = findings.some((f) => (SEVERITY_ORDER[f.severity] ?? 99) <= 2);
   return hasBlocking ? "Action required" : "Suggestions found";
 }
 
@@ -53,13 +154,15 @@ function extractPrSummary(presentationBody: string | undefined, prTitle?: string
       const text = m[1].replace(/\s+/g, " ").trim();
       if (text) {
         const sentences = text.match(/[^.!?]+[.!?]+(?:\s+|$)/g);
-        if (sentences && sentences.length > 0) return sentences.slice(0, 2).map((s) => s.trim()).join(" ").trim().slice(0, 400);
-        return text.slice(0, 400);
+        if (sentences && sentences.length > 0) {
+          return cutSafe(sentences.slice(0, 2).map((s) => s.trim()).join(" ").trim(), FIELD_LIMITS.presentation);
+        }
+        return cutSafe(text, FIELD_LIMITS.presentation);
       }
     }
   }
-  const title = (prTitle ?? "").replace(/\s+/g, " ").trim();
-  return title ? `Reviews changes in "${title.slice(0, 200)}".` : "Reviews the submitted changes.";
+  const title = stripReasoningArtifacts(prTitle ?? "").replace(/\s+/g, " ").trim();
+  return title ? `Reviews changes in "${cutSafe(title, 200)}".` : "Reviews the submitted changes.";
 }
 
 function sortFindings(findings: InlineFinding[]): InlineFinding[] {
@@ -76,26 +179,40 @@ function lineRef(f: InlineFinding): string {
   return f.startLine === f.endLine ? `L${f.startLine}` : `L${f.startLine}-L${f.endLine}`;
 }
 
-export function formatFixWithAgentPrompt(input: GitHubReviewSummaryInput, sorted: InlineFinding[]): string {
+/**
+ * Build the copy-pasteable agent prompt. `full` carries every field; `compact`
+ * drops prose; `minimal` keeps only title + location so an oversized review can
+ * still list every selected finding within GitHub's limit.
+ */
+export function formatFixWithAgentPrompt(
+  input: Pick<GitHubReviewSummaryInput, "headSha">,
+  sorted: InlineFinding[],
+  detail: AgentPromptDetail = "full",
+): string {
+  const findings = sanitizeFindings(sorted);
   const head = input.headSha && /^[0-9a-f]{40}$/i.test(input.headSha) ? input.headSha : "the current PR HEAD commit";
   const lines: string[] = [];
   lines.push("You are fixing issues found by Octopus Review on this pull request.");
   lines.push(`Before modifying code, verify you are on the current PR HEAD (${head}). If HEAD has changed, re-check each finding against the latest code and skip anything already fixed or no longer applicable.`);
   lines.push("");
-  if (sorted.length === 0) {
+  if (findings.length === 0) {
     lines.push("No actionable findings to fix.");
   } else {
-    lines.push(`Apply fixes for all ${sorted.length} actionable finding(s) below, respecting each minimum fix scope. Add or update the suggested regression tests where applicable.`);
+    lines.push(`Apply fixes for all ${findings.length} actionable finding(s) below, respecting each minimum fix scope. Add or update the suggested regression tests where applicable.`);
     lines.push("");
-    sorted.forEach((f, i) => {
+    findings.forEach((f, i) => {
       const sev = SEVERITY_LABEL[f.severity] ?? "Finding";
       lines.push(`Finding ${i + 1} [${sev}] ${f.title}`);
       lines.push(`Location: ${f.filePath}:${lineRef(f)}`);
+      if (detail === "minimal") {
+        lines.push("");
+        return;
+      }
       if (f.category) lines.push(`Category: ${f.category}`);
-      lines.push(`Description: ${f.description}`);
-      if (f.suggestion) lines.push(`Suggested fix:\n${f.suggestion}`);
-      lines.push(`Minimum fix scope: ${f.minimumFixScope?.trim() || "Apply the smallest safe change that resolves this finding."}`);
-      if (f.suggestedRegressionTest?.trim()) {
+      if (detail === "full" && f.description) lines.push(`Description: ${f.description}`);
+      if (detail === "full" && f.suggestion) lines.push(`Suggested fix:\n${f.suggestion}`);
+      lines.push(`Minimum fix scope: ${f.minimumFixScope || "Apply the smallest safe change that resolves this finding."}`);
+      if (f.suggestedRegressionTest) {
         lines.push(`Regression test:\n${f.suggestedRegressionTest}`);
       } else {
         lines.push("Regression test: Add or update a focused test that would fail before the fix and pass after it, if applicable.");
@@ -107,75 +224,181 @@ export function formatFixWithAgentPrompt(input: GitHubReviewSummaryInput, sorted
   return escapeFence(lines.join("\n").trimEnd());
 }
 
-export function formatInvalidAssessmentSummary(input: Omit<GitHubReviewSummaryInput, "findings" | "presentationBody"> & { reason?: string }): string {
-  const reason = stripReasoningArtifacts(input.reason || input.coverage.assessment?.reason || coverageSummary(input.coverage) || "Assessment invalid or incomplete.")
-    .replace(/\s+/g, " ").trim().slice(0, 300);
-  const history = input.reviewHistoryUrl ? ` [Complete Review History](${input.reviewHistoryUrl}).` : " Complete Review History is available from the review record.";
+type DocumentParts = {
+  verdict: string;
+  status: string;
+  headSha: string | null;
+  summary: string;
+  findings: InlineFinding[];
+  historyUrl?: string | null;
+};
+
+function renderHeader(p: DocumentParts): string[] {
+  return [
+    "## 🐙 Octopus Review",
+    "",
+    `**Verdict:** ${p.verdict}`,
+    `**Status:** ${p.status}`,
+    p.headSha
+      ? `**Reviewed commit:** \`${p.headSha}\` · ${historyLink(p.historyUrl)}`
+      : `**Review record:** ${historyLink(p.historyUrl)}`,
+    "",
+    p.summary,
+  ];
+}
+
+function renderDocument(p: DocumentParts, detail: AgentPromptDetail): string {
+  const lines = renderHeader(p);
+  lines.push("");
+  if (p.findings.length === 0) {
+    lines.push("No actionable findings were identified in the reviewed scope.");
+  } else {
+    lines.push(`### Actionable findings (${p.findings.length})`, "");
+    lines.push("| Severity | Location | Finding |");
+    lines.push("|----------|----------|---------|");
+    const titleLimit = detail === "full" ? FIELD_LIMITS.title : 120;
+    for (const f of p.findings) {
+      const sev = `${f.severity} ${SEVERITY_LABEL[f.severity] ?? ""}`.trim();
+      const loc = `\`${escapeCell(f.filePath)}:${lineRef(f)}\``;
+      lines.push(`| ${sev} | ${loc} | ${escapeCell(cutSafe(f.title, titleLimit))} |`);
+    }
+  }
+  lines.push("");
+  lines.push("<details>");
+  lines.push("<summary>🤖 Fix with Agent</summary>");
+  lines.push("");
+  lines.push("```text");
+  lines.push(formatFixWithAgentPrompt({ headSha: p.headSha }, p.findings, detail));
+  lines.push("```");
+  lines.push("");
+  lines.push("</details>");
+  return lines.join("\n");
+}
+
+/**
+ * Last-resort bounded document: a concise summary plus as many one-line
+ * findings as fit, with an explicit overflow note pointing at the archive.
+ */
+function renderOversized(p: DocumentParts): string {
+  const header = renderHeader(p).join("\n");
+  const budget = SUMMARY_BUDGET - header.length - 600;
+  const rows: string[] = [];
+  let used = 0;
+  for (const f of p.findings) {
+    const row = `- [${SEVERITY_LABEL[f.severity] ?? "Finding"}] ${escapeCell(cutSafe(f.title, 80))} — \`${escapeCell(cutSafe(f.filePath, 80))}:${lineRef(f)}\``;
+    if (used + row.length + 1 > budget) break;
+    rows.push(row);
+    used += row.length + 1;
+  }
+  const omitted = p.findings.length - rows.length;
+  const parts = [header, "", "### Actionable findings"];
+  if (rows.length > 0) parts.push(rows.join("\n"));
+  if (omitted > 0) {
+    parts.push(`> **${omitted} additional finding${omitted === 1 ? "" : "s"} omitted from this comment for size.** The full record is in ${historyLink(p.historyUrl)}.`);
+  }
+  const doc = parts.join("\n");
+  // The budget math above is conservative, but guarantee the hard cap anyway.
+  return doc.length > MAX_GITHUB_COMMENT_CHARS
+    ? `${cutSafe(doc, SUMMARY_BUDGET)}\n\n> **Comment truncated for GitHub size limits.** See ${historyLink(p.historyUrl)}.`
+    : doc;
+}
+
+function fitDocument(p: DocumentParts): string {
+  for (const detail of ["full", "compact", "minimal"] as const) {
+    const doc = renderDocument(p, detail);
+    if (doc.length <= SUMMARY_BUDGET) return doc;
+  }
+  return renderOversized(p);
+}
+
+/** Concise failure text shared by invalid assessments and hard failures. */
+export function formatFailureSummary(input: {
+  reason?: string | null;
+  /** Deterministic coverage disposition shown before the failure reason. */
+  coverageNote?: string | null;
+  headSha?: string | null;
+  reviewHistoryUrl?: string | null;
+}): string {
+  const detail = cutSafe(stripReasoningArtifacts(input.reason ?? "").replace(/\s+/g, " ").trim(), 300)
+    || "Assessment invalid or incomplete.";
+  const status = [stripReasoningArtifacts(input.coverageNote ?? "").trim(), detail].filter(Boolean).join(" — ");
+  const history = input.reviewHistoryUrl
+    ? ` [Complete Review History](${input.reviewHistoryUrl}).`
+    : " Complete Review History is available from the review record.";
   const head = input.headSha ? ` Reviewed commit: \`${input.headSha}\`.` : "";
   return [
     "## 🐙 Octopus Review",
     "",
     "**Verdict:** Assessment unavailable",
-    `**Status:** ${reason}${head}`,
+    `**Status:** ${status}${head}`,
     "",
     "This attempt did not produce a validated, authoritative review. No unvalidated findings are shown." + history,
   ].join("\n");
 }
 
-function conciseFailureSummary(input: GitHubReviewSummaryInput): string {
-  return formatInvalidAssessmentSummary(input);
+export function formatInvalidAssessmentSummary(
+  input: Omit<GitHubReviewSummaryInput, "findings" | "presentationBody"> & { reason?: string },
+): string {
+  return formatFailureSummary({
+    coverageNote: coverageSummary(input.coverage),
+    reason: input.reason || input.coverage.assessment?.reason,
+    headSha: input.headSha,
+    reviewHistoryUrl: input.reviewHistoryUrl,
+  });
 }
 
 export function formatGitHubReviewSummary(input: GitHubReviewSummaryInput): string {
   const { coverage } = input;
   const complete = reviewAssessmentComplete(coverage) && coverage.assessment?.state === "completed";
-  if (!complete) return conciseFailureSummary(input);
-
-  const sorted = sortFindings(input.findings);
-  const v = verdict(coverage, sorted);
-  const prSummary = extractPrSummary(input.presentationBody, input.prTitle);
-  const cov = coverageSummary(coverage);
-  const historyLink = input.reviewHistoryUrl ? `[Complete Review History](${input.reviewHistoryUrl})` : "Complete Review History";
-  const head = input.headSha ? `\`${input.headSha}\`` : "`unknown`";
-
-  const parts: string[] = [];
-  parts.push("## 🐙 Octopus Review");
-  parts.push("");
-  parts.push(`**Verdict:** ${v}`);
-  parts.push(`**Status:** ${cov}${input.reReview && input.resolvedCount ? ` (${input.resolvedCount} resolved)` : ""}`);
-  parts.push(`**Reviewed commit:** ${head} · ${historyLink}`);
-  parts.push("");
-  parts.push(prSummary);
-  parts.push("");
-
-  if (sorted.length === 0) {
-    parts.push("No actionable findings were identified in the reviewed scope.");
-  } else {
-    parts.push(`### Actionable findings (${sorted.length})`);
-    parts.push("");
-    parts.push("| Severity | Location | Finding |");
-    parts.push("|----------|----------|---------|");
-    for (const f of sorted) {
-      const sev = `${f.severity} ${SEVERITY_LABEL[f.severity] ?? ""}`.trim();
-      const loc = `\`${escapeCell(f.filePath)}:${lineRef(f)}\``;
-      const title = escapeCell(f.title);
-      parts.push(`| ${sev} | ${loc} | ${title} |`);
+  if (!complete) {
+    // "not-required" is a valid, non-failing outcome; everything else is invalid.
+    if (reviewAssessmentComplete(coverage) && coverage.assessment?.state === "not-required") {
+      return renderDocument({
+        verdict: "No review required",
+        status: coverageSummary(coverage),
+        headSha: input.headSha,
+        summary: "No changed paths in this pull request require review under the repository policy.",
+        findings: [],
+        historyUrl: input.reviewHistoryUrl,
+      }, "minimal");
     }
+    return formatInvalidAssessmentSummary(input);
   }
 
-  parts.push("");
-  parts.push("<details>");
-  parts.push("<summary>🤖 Fix with Agent</summary>");
-  parts.push("");
-  parts.push("```text");
-  parts.push(formatFixWithAgentPrompt(input, sorted));
-  parts.push("```");
-  parts.push("");
-  parts.push("</details>");
+  const findings = sortFindings(sanitizeFindings(input.findings));
+  return fitDocument({
+    verdict: verdictFor(findings),
+    status: `${coverageSummary(coverage)}${input.reReview && input.resolvedCount ? ` (${input.resolvedCount} resolved)` : ""}`,
+    headSha: input.headSha,
+    summary: extractPrSummary(input.presentationBody, input.prTitle),
+    findings,
+    historyUrl: input.reviewHistoryUrl,
+  });
+}
 
-  const body = parts.join("\n");
-  if (body.length > 60000) {
-    return body + "\n\n> **Note:** This comment is large; see Complete Review History for the full archived record.";
-  }
-  return body;
+export type LargeReviewSummaryInput = {
+  findings: InlineFinding[];
+  headSha: string | null;
+  prTitle?: string | null;
+  reviewHistoryUrl?: string | null;
+};
+
+/**
+ * Compact output for the large-PR pipeline. The large worker does not carry a
+ * verified changed-file coverage record, so the status states that explicitly
+ * instead of borrowing the normal review's coverage summary.
+ */
+export function formatLargeReviewSummary(input: LargeReviewSummaryInput): string {
+  const findings = sortFindings(sanitizeFindings(input.findings));
+  const title = stripReasoningArtifacts(input.prTitle ?? "").replace(/\s+/g, " ").trim();
+  return fitDocument({
+    verdict: verdictFor(findings),
+    status: "Large-PR review · no inline comments · changed-file coverage not verified",
+    headSha: input.headSha,
+    summary: title
+      ? `Reviews changes in "${cutSafe(title, 200)}". Findings below come from the large-PR pipeline; re-check each against the current code before fixing.`
+      : "Findings below come from the large-PR pipeline; re-check each against the current code before fixing.",
+    findings,
+    historyUrl: input.reviewHistoryUrl,
+  });
 }

@@ -12,6 +12,7 @@ import {
   extractDiffFiles,
 } from "@/lib/review-dedup";
 import { getCategoryConfidenceThreshold } from "@/lib/review-categories";
+import { stripReasoningArtifacts, stripReasoningTags } from "@/lib/review-github-summary";
 // Re-define the type locally to avoid importing from github.ts (which has side effects in some envs)
 export type ReviewComment = {
   path: string;
@@ -274,11 +275,11 @@ export function buildLowSeveritySummary(findings: InlineFinding[]): string {
   // would otherwise close the cell, and newlines would break the row. We keep
   // the FULL text — truncating here (issue #515) leaves no way to read the
   // complete finding, since these findings have no inline comment to expand.
-  const tableCell = (text: string) =>
-    text.replace(/\|/g, "\\|").replace(/\r?\n+/g, "<br>").trim();
+  const tableCell = (text: string, max: number) =>
+    stripReasoningArtifacts(text).replace(/\|/g, "\\|").replace(/\r?\n+/g, "<br>").trim().slice(0, max);
 
   const toRow = (f: InlineFinding) =>
-    `| ${f.severity} | \`${f.filePath}:L${f.startLine}\` | ${tableCell(f.title)} | ${tableCell(f.description)} |`;
+    `| ${f.severity} | \`${stripReasoningArtifacts(f.filePath)}:L${f.startLine}\` | ${tableCell(f.title, 200)} | ${tableCell(f.description, 600)} |`;
 
   const parts: string[] = [];
 
@@ -426,6 +427,10 @@ function findNearestChangedLine(
   return null;
 }
 
+function cleanInlineLine(value: string | undefined, max: number): string {
+  return stripReasoningArtifacts(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
 /**
  * Convert parsed findings into GitHub review comments, filtering to valid diff lines.
  *
@@ -479,12 +484,19 @@ export function buildInlineComments(
     }
     if (!targetLine) continue;
 
-    let body = `**${f.severity} ${f.title}**\n\n${f.description}`;
-    if (f.suggestion) {
+    const title = cleanInlineLine(f.title, 200) || "Finding";
+    const description = stripReasoningTags(f.description ?? "").trim();
+    const suggestion = f.suggestion ? stripReasoningTags(f.suggestion).trim() : "";
+    const minimumFixScope = f.minimumFixScope ? cleanInlineLine(f.minimumFixScope, 600) : "";
+    const regressionTest = f.suggestedRegressionTest ? stripReasoningTags(f.suggestedRegressionTest).trim() : "";
+    const category = cleanInlineLine(f.category, 60);
+
+    let body = `**${f.severity} ${title}**\n\n${description}`;
+    if (suggestion) {
       // GitHub supports native ```suggestion blocks; Bitbucket uses plain code blocks
       const suggestionBlock = provider === "github"
-        ? `\`\`\`suggestion\n${f.suggestion}\n\`\`\``
-        : `**Suggested fix:**\n\`\`\`\n${f.suggestion}\n\`\`\``;
+        ? `\`\`\`suggestion\n${suggestion}\n\`\`\``
+        : `**Suggested fix:**\n\`\`\`\n${suggestion}\n\`\`\``;
       body += `\n\n${suggestionBlock}`;
     }
 
@@ -494,19 +506,30 @@ export function buildInlineComments(
     //   - suggestedRegressionTest gives the dev a concrete test to add
     // Without this block the fields only survived in the DB row — the
     // tokens spent on them never reached the user.
-    if (f.minimumFixScope || f.suggestedRegressionTest) {
+    if (minimumFixScope || regressionTest) {
       const groundingParts: string[] = [];
-      if (f.minimumFixScope) {
-        groundingParts.push(`**Minimum fix scope:** ${f.minimumFixScope}`);
+      if (minimumFixScope) {
+        groundingParts.push(`**Minimum fix scope:** ${minimumFixScope}`);
       }
-      if (f.suggestedRegressionTest) {
-        groundingParts.push(`**Suggested regression test:**\n\`\`\`\n${f.suggestedRegressionTest}\n\`\`\``);
+      if (regressionTest) {
+        groundingParts.push(`**Suggested regression test:**\n\`\`\`\n${regressionTest}\n\`\`\``);
       }
       body += `\n\n<details><summary>📌 Grounding</summary>\n\n${groundingParts.join("\n\n")}\n\n</details>`;
     }
 
-    // Per-finding fix prompts are intentionally omitted from inline comments.
-    // A single consolidated "🤖 Fix with Agent" prompt is included in the GitHub summary comment.
+    // GitHub gets a single consolidated "🤖 Fix with Agent" prompt in the
+    // review summary. Other providers keep the per-finding prompt so their
+    // inline comments remain actionable on their own.
+    if (provider !== "github") {
+      const severityLabel = f.severity === "🔴" ? "Critical" : f.severity === "🟠" ? "High" : f.severity === "🟡" ? "Medium" : f.severity === "🔵" ? "Low" : "Nit";
+      const categoryNote = category ? ` (${category})` : "";
+      const lineRange = f.startLine === f.endLine ? `line ${f.startLine}` : `lines ${f.startLine}-${f.endLine}`;
+      let aiPrompt = `Fix the following ${severityLabel}${categoryNote} issue in \`${f.filePath}\` at ${lineRange}:\n\n`;
+      aiPrompt += `Problem: ${description}`;
+      if (suggestion) aiPrompt += `\n\nSuggested fix:\n${suggestion}`;
+      if (minimumFixScope) aiPrompt += `\n\nScope: ${minimumFixScope}`;
+      body += `\n\n<details><summary>🤖 AI Fix Prompt</summary>\n\n\`\`\`\n${aiPrompt}\n\`\`\`\n\n</details>`;
+    }
 
     // Snap note last — it's a footnote-style hint about where the comment
     // landed, not part of the description or suggestion. Keeping it at the

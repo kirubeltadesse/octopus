@@ -444,11 +444,20 @@ describe("buildInlineComments", () => {
     expect(comments[0].body).not.toContain("```suggestion");
   });
 
-  it("does not include per-finding AI Fix Prompt section", () => {
+  it("does not include per-finding AI Fix Prompt for GitHub", () => {
     const findings = [makeFinding()];
     const diffLines = new Map([["src/index.ts", new Set([10, 11, 12])]]);
-    const comments = buildInlineComments(findings, diffLines);
+    const comments = buildInlineComments(findings, diffLines, "github");
     expect(comments[0].body).not.toContain("AI Fix Prompt");
+  });
+
+  it("keeps per-finding AI Fix Prompt for Bitbucket, GitLab and Forgejo", () => {
+    for (const provider of ["bitbucket", "gitlab", "forgejo"]) {
+      const findings = [makeFinding()];
+      const diffLines = new Map([["src/index.ts", new Set([10, 11, 12])]]);
+      const comments = buildInlineComments(findings, diffLines, provider);
+      expect(comments[0].body).toContain("AI Fix Prompt");
+    }
   });
 });
 

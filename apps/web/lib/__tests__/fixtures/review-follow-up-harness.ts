@@ -1052,6 +1052,9 @@ if (crashRecovery) {
   assert.equal(deliveries.get(attempt.id)?.mainCommentId, 123);
   assert.deepEqual([published.length, checkConclusions.length], [1, 1]);
   const finalSummary = summaries.at(-1)!;
+  assert.ok(finalSummary.startsWith("## 🐙 Octopus Review"), "a successful normal review publishes the compact summary");
+  assert.ok(finalSummary.includes("🤖 Fix with Agent"), "a successful normal review publishes the consolidated agent prompt");
+  assert.ok(!finalSummary.includes("OCTOPUS_FINDINGS_START"), "the public summary never carries the findings block");
   const finalCheck = checkConclusions[0];
   const dispatched = usageCount;
 
@@ -1068,9 +1071,11 @@ if (crashRecovery) {
   stopped();
   await processReview("pr");
   assert.equal(summaries.length, 1);
-  assert.ok(summaries[0].startsWith(`Review attempt: ${attempt.id}. Head: ${pr.headSha}.`));
-  assert.ok(summaries[0].includes("### Score") && !summaries[0].includes("OCTOPUS_FINDINGS_START"), "the comment is derived from the archived report");
-  assert.equal(summaries[0].includes("### Summary"), finalSummary.includes("### Summary"));
+  assert.ok(summaries[0].startsWith("## 🐙 Octopus Review"), "the comment uses the compact GitHub summary");
+  assert.ok(summaries[0].includes("🤖 Fix with Agent"), "the compact summary carries the consolidated agent prompt");
+  assert.ok(!summaries[0].includes("OCTOPUS_FINDINGS_START"), "the comment is derived from the archived report");
+  assert.ok(summaries[0].includes(`/review-attempts/${attempt.id}`), "the compact summary links the archive");
+  assert.equal(summaries[0].includes("🤖 Fix with Agent"), finalSummary.includes("🤖 Fix with Agent"));
   assert.deepEqual(checkConclusions, [finalCheck]);
   assert.ok(deliveries.get(attempt.id)?.completedAt);
   assert.ok(pr.firstReviewCompletedAt);
@@ -1333,9 +1338,10 @@ console.error = () => {};
 try { await processReview("pr"); } finally { console.error = originalError; }
 assert.equal(archived.length, beforeFallback + 1);
 assert.equal(directComments, 0, "Native failures must not create untracked comments");
-assert.ok(summaries.at(-1)?.includes("Missing null check"));
-assert.ok(summaries.at(-1)?.includes("### Score"));
-assert.ok(summaries.at(-1)?.includes("Review coverage"));
+assert.ok(summaries.at(-1)?.includes("Missing null check"), "validated findings reach the compact summary");
+assert.ok(!summaries.at(-1)?.includes("### Score"), "the compact summary omits the score table");
+assert.ok(!summaries.at(-1)?.includes("Review coverage"), "the compact summary omits the coverage inventory");
+assert.ok(summaries.at(-1)?.includes("🤖 Fix with Agent"), "the compact summary carries the consolidated agent prompt");
 
 // The real hosted post-primary pipeline must not publish a scored completion after cancellation.
 nativeFailure = false;
@@ -1371,8 +1377,10 @@ for (const stage of ["generation-cancel", "generation-timeout", "generation-expi
   assert.equal(coverage.files[0].state, "supplied", stage);
   assert.ok(coverage.assessment?.reason.includes("cancelled or expired"), stage);
   assert.ok(!/\|[^\n]*[1-5]\/5/.test(summaries.at(-1)!), stage);
-  assert.ok(summaries.at(-1)!.startsWith(`Review attempt: ${failed.id}. Head:`), stage);
-  assert.ok(summaries.at(-1)!.includes(`/api/review-attempts/${failed.id}`), stage);
+  assert.ok(repo.provider === "github"
+    ? summaries.at(-1)!.startsWith("## 🐙 Octopus Review")
+    : summaries.at(-1)!.startsWith(`Review attempt: ${failed.id}. Head:`), stage);
+  assert.ok(summaries.at(-1)!.includes(`/review-attempts/${failed.id}`), stage);
   assert.ok(!checkConclusions.slice(checks).includes("success"), stage);
   if (stage === "before-validator" || stage.startsWith("generation-")) assert.equal(validatorCalls, validations);
   else assert.equal(validatorCalls, validations + 1);
@@ -1414,8 +1422,10 @@ for (const stage of ["summary-send", "summary-timeout", "check-send", "gitlab-au
   assert.equal(coverage.assessment?.capacityAdmission?.primaryDispatch, "started", stage);
   assert.equal(coverage.files[0].state, "supplied", stage);
   assert.ok(coverage.limitations.some(reason => reason.includes(archived[before].id)), stage);
-  assert.ok(summaries.at(-1)!.startsWith(`Review attempt: ${failed.id}. Head:`), stage);
-  assert.ok(summaries.at(-1)!.includes(`/api/review-attempts/${failed.id}`), stage);
+  assert.ok(repo.provider === "github"
+    ? summaries.at(-1)!.startsWith("## 🐙 Octopus Review")
+    : summaries.at(-1)!.startsWith(`Review attempt: ${failed.id}. Head:`), stage);
+  assert.ok(summaries.at(-1)!.includes(`/review-attempts/${failed.id}`), stage);
   assert.ok(!/\|[^\n]*[1-5]\/5/.test(summaries.at(-1)!), stage);
   assert.ok(["failure", "failed"].includes(checkConclusions.at(-1)!), stage);
   assert.ok(!outcomeEvents.some(event => event.type === "review-completed" || event.status === "completed"), stage);

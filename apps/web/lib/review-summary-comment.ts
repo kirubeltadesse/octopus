@@ -51,9 +51,14 @@ export async function publishReviewSummary(target: SummaryTarget): Promise<numbe
           where: { pullRequestId: target.pullRequestId }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 1,
           select: { id: true },
         });
-        const history = attempts[0]
-          ? `\n\nReview history: ${new URL(`/review-attempts/${attempts[0].id}`, process.env.NEXT_PUBLIC_APP_URL ?? "https://octopus-review.ai").href}`
-          : "";
+        // The compact review summary already links the same archive record;
+        // only append the canonical history line when the body does not.
+        const historyUrl = attempts[0]
+          ? new URL(`/review-attempts/${attempts[0].id}`, process.env.NEXT_PUBLIC_APP_URL ?? "https://octopus-review.ai").href
+          : null;
+        const alreadyLinked = historyUrl !== null
+          && (target.body.includes(`Review history: ${historyUrl}`) || target.body.includes(`[Complete Review History](${historyUrl})`));
+        const history = historyUrl && !alreadyLinked ? `\n\nReview history: ${historyUrl}` : "";
         // Place history before the footer so consumers can still identify the head.
         const footer = /\n*Last reviewed commit: [0-9a-f]{40}\s*$/i.exec(target.body)?.[0] ?? "";
         const body = (footer ? target.body.slice(0, -footer.length) : target.body) + history + footer;

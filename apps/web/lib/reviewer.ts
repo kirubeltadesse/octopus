@@ -1420,8 +1420,11 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
       recordReviewMain = true;
       try {
         await outcomeRecord.publish(async () => {
-          if (isGitHub) reviewCommentId = await publishMainComment(body, body);
-          else if (reviewCommentId) await providerUpdateComment(reviewCommentId, body);
+          if (isGitHub) {
+            const reviewHistoryUrl = new URL(`/review-attempts/${attemptId}`, process.env.NEXT_PUBLIC_APP_URL ?? "https://octopus-review.ai").href;
+            const summary = formatInvalidAssessmentSummary({ coverage, attemptId, headSha: pr.headSha, reviewHistoryUrl });
+            reviewCommentId = await publishMainComment(summary, body);
+          } else if (reviewCommentId) await providerUpdateComment(reviewCommentId, body);
           else return await publishMainComment(body);
           return reviewCommentId;
         });
@@ -2277,6 +2280,12 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
     );
     const reviewEvent = shouldRequestChanges ? "REQUEST_CHANGES" : "COMMENT";
 
+    // Findings may only be published when the assessment is still valid after
+    // presentation finalization. An invalid assessment gets the concise failure
+    // summary and no inline/review findings, so raw or unvalidated output can
+    // never reach the PR.
+    const assessmentValid = reviewAssessmentComplete(coverage) && coverage.assessment?.state === "completed";
+
     // Track the actual number of findings visible to the user (inline + summary table)
     // This gets set by the GitHub/Bitbucket posting logic below
     let effectiveFindingsCount = 0;
@@ -2305,7 +2314,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
     // Determine which findings go into the review summary (non-inline ones)
     let inlineReviewSucceeded = false;
 
-    if (isGitHub && installationId) {
+    if (isGitHub && installationId && assessmentValid) {
       // GitHub: use the PR review API for inline comments
       if (inlineComments.length > 0) {
         // Dedup: skip inline comments where the bot already posted on the same file+line
@@ -2522,6 +2531,24 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
     const promoted = await saveReviewAttempt(attemptId, pr.id, coverage, effectiveReviewBody, mergedIssues);
     attemptSaved = true;
 
+    // The public GitHub comment is derived deterministically from the final
+    // validated findings and the immutable archive. The full report stays in
+    // the archive; the comment stays short and never reflects raw model output.
+    if (isGitHub) {
+      const reviewHistoryUrl = new URL(`/review-attempts/${attemptId}`, process.env.NEXT_PUBLIC_APP_URL ?? "https://octopus-review.ai").href;
+      mainCommentBody = formatGitHubReviewSummary({
+        coverage,
+        attemptId,
+        headSha: pr.headSha,
+        prTitle: pr.title,
+        presentationBody: effectiveReviewBody,
+        findings,
+        reviewHistoryUrl,
+        reReview: isReReview,
+        resolvedCount,
+      });
+    }
+
     // The final scored comment becomes visible only after its immutable outcome is durable.
     assertProcessingActive();
     // Publication is checkpointed, so a redelivered job can finish it if this worker stops (see resumeReviewPublication).
@@ -2735,8 +2762,15 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
     }
 
     // Update placeholder comment with error if possible
-    if (isGitHub && failureBody) {
-      await publishMainComment(failureBody, failureBody, failureAttemptId).catch((e) => console.error("[reviewer] Failed to publish archived failure:", safeErrorDetails(e)));
+    if (isGitHub && failureBody && attemptCoverage) {
+      const failureHistoryUrl = new URL(`/review-attempts/${failureAttemptId}`, process.env.NEXT_PUBLIC_APP_URL ?? "https://octopus-review.ai").href;
+      const failureSummary = formatInvalidAssessmentSummary({
+        coverage: attemptCoverage,
+        attemptId: failureAttemptId,
+        headSha: pr.headSha,
+        reviewHistoryUrl: failureHistoryUrl,
+      });
+      await publishMainComment(failureSummary, failureBody, failureAttemptId).catch((e) => console.error("[reviewer] Failed to publish archived failure:", safeErrorDetails(e)));
     } else if (reviewCommentId) {
       await providerUpdateComment(
         reviewCommentId,

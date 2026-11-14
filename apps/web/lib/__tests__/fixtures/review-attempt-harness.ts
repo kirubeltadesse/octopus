@@ -208,6 +208,7 @@ console.log("PASS stale-head isolation, immutable attempts, token/session tenant
 const checks: unknown[][] = [];
 let failCheck = false;
 let failSummary = false;
+let summaryUpdateAttempts = 0;
 const published: unknown[][] = [];
 let allowPublication = false;
 let nativeOnlyFailure = false;
@@ -218,8 +219,8 @@ mock.module("@/lib/github", () => ({
   getInstallationToken: async () => "fixture-token",
   getPullRequestDetails: async () => ({ headSha: providerHead }),
   updateCheckRun: async (...args: unknown[]) => { assert.ok([...rows.values()].some(row => (row.coverage as { nativeCheckId?: string }).nativeCheckId === String(args[3])), "Native completion requires a durable archive"); checks.push(args); if (failCheck) throw new Error("Transient check failure"); },
-  createPullRequestComment: async (...args: unknown[]) => { if (failSummary && String(args[4]).includes("Large PR —")) throw new Error("Transient summary failure"); if (!allowPublication) unexpectedPublication(); await duringPublication?.(); published.push(args); return 900; },
-  updatePullRequestComment: async (...args: unknown[]) => { if (failSummary && String(args[4]).includes("Large PR —")) throw new Error("Transient summary failure"); if (!allowPublication) unexpectedPublication(); await duringPublication?.(); published.push(args); },
+  createPullRequestComment: async (...args: unknown[]) => { if (failSummary && String(args[4]).includes("## 🐙 Octopus Review")) throw new Error("Transient summary failure"); if (!allowPublication) unexpectedPublication(); await duringPublication?.(); published.push(args); return 900; },
+  updatePullRequestComment: async (...args: unknown[]) => { if (!allowPublication) unexpectedPublication(); if (failSummary && String(args[4]).includes("## 🐙 Octopus Review") && ++summaryUpdateAttempts > 1) throw new Error("Transient summary failure"); await duringPublication?.(); published.push(args); },
   createPullRequestReview: async (...args: unknown[]) => { if (failSummary || nativeOnlyFailure) throw new Error("Transient summary failure"); if (!allowPublication) unexpectedPublication(); published.push(args); return 901; },
 }));
 mock.module("@/lib/pubby", () => ({ pubby: { trigger: unexpectedPublication } }));
@@ -594,8 +595,10 @@ try { await handleLargeReviewResult(fallbackJob); } finally { console.error = or
 const fallbackCalls = published.slice(beforeFallback);
 assert.equal(fallbackCalls.length, 2);
 assert.ok(fallbackCalls.every(call => call[3] === Number(current.reviewCommentId)), "Fallback must update the tracked comment");
-assert.ok(String(fallbackCalls[1][4]).includes("Large PR —"));
-assert.ok(String(fallbackCalls[1][4]).includes("Review coverage"));
+assert.ok(String(fallbackCalls[1][4]).startsWith("## 🐙 Octopus Review"), "fallback uses the compact summary");
+assert.ok(String(fallbackCalls[1][4]).includes("No unvalidated findings are shown"), "invalid output is not published as findings");
+assert.ok(!String(fallbackCalls[1][4]).includes("Retry result"), "raw review output never reaches the comment");
+assert.ok(String(fallbackCalls[1][4]).includes(`/review-attempts/${fallbackJob.attemptId}`), "compact summary links the archive");
 assert.ok(String(fallbackCalls[1][4]).endsWith(`Last reviewed commit: ${currentHead}`));
 assert.ok(deliveries.get(fallbackJob.attemptId)?.summaryPublished);
 

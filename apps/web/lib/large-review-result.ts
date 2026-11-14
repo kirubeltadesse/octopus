@@ -12,12 +12,12 @@ import {
   createPullRequestReview as ghCreatePullRequestReview,
   updateCheckRun as ghUpdateCheckRun,
 } from "@/lib/github";
-import { parseFindings } from "@/lib/review-dedup";
+import { parseFindings, parseFindingsFromJson } from "@/lib/review-dedup";
+import { formatFailureSummary, formatLargeReviewSummary } from "@/lib/review-github-summary";
 import { findingSignature, mergeFindingsBySignature, inheritReviewIssueTriage } from "@/lib/finding-merge";
 import {
   buildLowSeveritySummary,
   normalizeLastReviewedCommit,
-  stripDetailedFindings,
   filterByConfidence,
   resolveConfidenceThreshold,
   sortAndCapFindings,
@@ -98,6 +98,7 @@ export async function handleLargeReviewResult(
     if (Number.isSafeInteger(data.checkRunId) && data.checkRunId! > 0) coverage.nativeCheckId = String(data.checkRunId);
   }
   const errorMessage = data.error ? safeLargeReviewError(data.error) : null;
+  const reviewHistoryUrl = new URL(`/review-attempts/${attemptId}`, process.env.NEXT_PUBLIC_APP_URL ?? "https://octopus-review.ai").href;
   let reviewBody = applyReviewCoverage(errorMessage ? `Large review failed: ${errorMessage}` : data.reviewBody, coverage, attemptId);
   let failureFingerprint = data.error ? createHash("sha256").update(JSON.stringify(["large-review-error-v1", attemptId, data.error])).digest("hex") : null;
   if (data.error && correlated) {
@@ -201,21 +202,33 @@ export async function handleLargeReviewResult(
   };
   if (!await stillCurrent()) return;
 
+  // Findings are only safe to publish when the archived body carries a valid
+  // structured findings block. Otherwise the comment must not surface output
+  // that was never validated as a findings set.
+  const hasValidatedFindings = !data.error && parseFindingsFromJson(reviewBody) !== null;
+  const compactCommentBody = data.error
+    ? applyReviewCoverage([
+        "> 🐙 **Octopus Review** encountered an error while analyzing this large pull request.",
+        ">", `> \`${errorMessage}\``, ">",
+        "> Please try again by commenting `@octopus-review` on this PR.",
+      ].join("\n"), coverage, attemptId)
+    : hasValidatedFindings
+      ? formatLargeReviewSummary({ findings, headSha: coverage.headSha, prTitle: pr.title, reviewHistoryUrl })
+      : formatFailureSummary({
+          reason: "The large review did not return a valid findings set; no authoritative findings are shown.",
+          headSha: coverage.headSha,
+          reviewHistoryUrl,
+        });
+
   // Archive existence does not mean that remote delivery completed. Persist
   // checkpoints separately, so retries resume the unfinished publication.
   await deliverReviewAttempt(attemptId, async (progress, checkpoint) => {
     if (!await stillCurrent()) return;
     let mainCommentId: bigint | number | null = progress.mainCommentId;
     if (!mainCommentId) {
-      const errorBody = [
-        "> 🐙 **Octopus Review** encountered an error while analyzing this large pull request.",
-        ">", `> \`${errorMessage}\``, ">",
-        "> Please try again by commenting `@octopus-review` on this PR.",
-      ].join("\n");
-      const commentBody = data.error ? applyReviewCoverage(errorBody, coverage, attemptId) : stripDetailedFindings(reviewBody);
       const postMain = () => publishReviewSummary({ pullRequestId: pr.id, headSha: coverage.headSha,
         reviewRequestVersion: coverage.reviewRequestVersion, installationId, owner, repo: repoName,
-        prNumber: pr.number, body: commentBody, expectedReviewBody: reviewBody,
+        prNumber: pr.number, body: compactCommentBody, expectedReviewBody: reviewBody,
         onPosted: !data.error && recordOutcome ? outcomeRecord.mainPosted : undefined });
       mainCommentId = !data.error && recordOutcome ? await outcomeRecord.publish(postMain) : await postMain();
       if (mainCommentId === null) return;
@@ -232,17 +245,19 @@ export async function handleLargeReviewResult(
       await outcomeRecord.finish(new Date());
     }
     if (!progress.summaryPublished) {
-      const findingsBlock = buildLowSeveritySummary(findings);
+      const findingsBlock = hasValidatedFindings ? buildLowSeveritySummary(findings) : "";
       const summaryHeader = `${coverageSummary(coverage)} Large PR — ${findings.length} finding${findings.length !== 1 ? "s" : ""}${
-        mainCommentId && pr.url ? ` | [View details](${pr.url}#issuecomment-${mainCommentId})` : ""
+        mainCommentId && pr.url && hasValidatedFindings ? ` | [View details](${pr.url}#issuecomment-${mainCommentId})` : ""
       }`;
-      const summaryBody = [
-        summaryHeader,
-        findingsBlock,
-        `<sub>Reviewed by [Octopus Review](https://octopus-review.ai) (large-PR pipeline, no inline comments).</sub>`,
-      ]
-        .filter(Boolean)
-        .join("\n\n");
+      const summaryBody = hasValidatedFindings
+        ? [
+            summaryHeader,
+            findingsBlock,
+            `<sub>Reviewed by [Octopus Review](https://octopus-review.ai) (large-PR pipeline, no inline comments).</sub>`,
+          ]
+            .filter(Boolean)
+            .join("\n\n")
+        : compactCommentBody;
 
       try {
         await ghCreatePullRequestReview(
@@ -266,7 +281,7 @@ export async function handleLargeReviewResult(
         );
         if (await publishReviewSummary({ pullRequestId: pr.id, headSha: coverage.headSha,
           reviewRequestVersion: coverage.reviewRequestVersion, installationId, owner, repo: repoName,
-          prNumber: pr.number, body: normalizeLastReviewedCommit(`${stripDetailedFindings(reviewBody)}\n\n${summaryBody}`, coverage.headSha),
+          prNumber: pr.number, body: normalizeLastReviewedCommit(compactCommentBody, coverage.headSha),
           expectedReviewBody: reviewBody }) === null) return;
       }
       await checkpoint({ summaryPublished: true });
