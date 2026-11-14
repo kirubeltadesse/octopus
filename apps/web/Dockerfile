@@ -16,14 +16,20 @@ COPY packages/forgejo-connector/package.json ./packages/forgejo-connector/
 COPY packages/package-analyzer/package.json ./packages/package-analyzer/
 COPY tools/tsconfig/package.json ./tools/tsconfig/
 COPY tools/eslint-config/package.json ./tools/eslint-config/
-RUN bun install --frozen-lockfile
+# Install all development dependencies using a predictable
+# workspace layout for the multi-stage Docker build.
+RUN NODE_ENV=development bun install --frozen-lockfile --linker hoisted
+
+# Verify Prisma was installed before copying dependencies
+# into the builder stage.
+RUN test -x node_modules/.bin/prisma \
+  || test -x packages/db/node_modules/.bin/prisma
 
 # --- build ---
 FROM base AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/apps/web/node_modules ./apps/web/node_modules
-COPY --from=deps /app/packages/db/node_modules ./packages/db/node_modules
 COPY tools ./tools
 COPY packages/db ./packages/db
 COPY packages/forgejo-connector ./packages/forgejo-connector
@@ -54,8 +60,8 @@ ENV NODE_OPTIONS="--max-old-space-size=4096"
 # so withSentryConfig can upload source maps. Absent/empty → upload is skipped
 # (self-host builds and any build before the CI secret is set).
 RUN --mount=type=secret,id=sentry_auth_token \
-    export SENTRY_AUTH_TOKEN="$(cat /run/secrets/sentry_auth_token 2>/dev/null || true)" && \
-    cd apps/web && bun run build
+  export SENTRY_AUTH_TOKEN="$(cat /run/secrets/sentry_auth_token 2>/dev/null || true)" && \
+  cd apps/web && bun run build
 RUN cd apps/web && bun build scripts/rc-acceptance.ts --target=node --outfile=/app/rc-acceptance.mjs
 RUN cd apps/web && bun run scripts/build-sentry-smoke.ts /app/sentry-smoke.mjs
 
@@ -64,8 +70,8 @@ FROM node:22-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 RUN apk add --no-cache git && \
-    addgroup --system --gid 1001 nodejs && \
-    adduser --system --uid 1001 nextjs
+  addgroup --system --gid 1001 nodejs && \
+  adduser --system --uid 1001 nextjs
 
 COPY --from=builder --chown=nextjs:nodejs /app/apps/web/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/apps/web/public ./apps/web/public
