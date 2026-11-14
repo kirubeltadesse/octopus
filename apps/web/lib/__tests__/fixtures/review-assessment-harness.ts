@@ -319,8 +319,8 @@ for (const [name, text, finish, complete] of [
   const covered = applyReviewCoverage(prepared, p.coverage, name);
   const { report, comment } = finalizeReviewPresentation(text, covered, stripDetailedFindings(covered), p.coverage, name, flags);
   await saveReviewAttempt(name, "pr", p.coverage, report);
-  assert.equal((current.reviewCoverage as typeof p.coverage).complete, true);
-  assert.equal(reviewAssessmentComplete(current.reviewCoverage as typeof p.coverage), complete);
+  assert.equal((current.reviewCoverage as typeof p.coverage).complete, true, name);
+  assert.equal(reviewAssessmentComplete(current.reviewCoverage as typeof p.coverage), complete, name);
   // reviewer.ts places this fixed banner between its attempt label and coverage
   // on a completed re-review with zero new findings.
   const rereviewBanner = complete && name.includes("rereview") ? `> ✅ No new issues detected since the last review (commit \`${p.coverage.headSha!.slice(0, 7)}\`).\n\n` : "";
@@ -578,6 +578,19 @@ for (const [name, text] of [
   ["heading-suffix", valid.replace("## 🐙 Octopus Review", "## 🐙 Octopus Review — PR #2337")],
   ["overall-plain", valid.replace("| **Overall** | **4/5** |", "| Overall | 4/5 |")],
   ["overall-half-bold", valid.replace("| **Overall** | **4/5** |", "| **Overall** | 4/5 |")],
+  // Legacy and model-generated heading typography that normalizes deterministically.
+  ["heading-h1", valid.replace("## 🐙 Octopus Review", "# Octopus Review")],
+  ["heading-h3", valid.replace("## 🐙 Octopus Review", "### 🐙 Octopus Review")],
+  ["heading-code-review", valid.replace("## 🐙 Octopus Review", "## Octopus Code Review")],
+  ["heading-lowercase", valid.replace("## 🐙 Octopus Review", "## 🐙 octopus review")],
+  ["heading-atx-close", valid.replace("## 🐙 Octopus Review", "## 🐙 Octopus Review ##")],
+  ["summary-h2", valid.replace("### Summary", "## Summary")],
+  ["summary-of-changes", valid.replace("### Summary", "### Summary of Changes")],
+  ["summary-atx-close", valid.replace("### Summary", "### Summary ###")],
+  ["score-scores", valid.replace("### Score", "### Scores")],
+  ["score-h2", valid.replace("### Score", "## Score")],
+  ["findings-summary-h2", valid.replace("### Findings Summary", "## Findings Summary")],
+  ["bom", "\uFEFF" + valid],
 ] as const) {
   const p = plan();
   output = { choices: [{ message: { content: text }, finish_reason: "stop" }] };
@@ -586,6 +599,17 @@ for (const [name, text] of [
   assert.equal(p.coverage.assessment?.responseSha256, sha256(text), `${name}: the hash covers the response as received`);
   assert.equal(response.text, valid, `${name}: callers get the canonical text`);
   assert.equal(validReviewResponse(text), true, name);
+}
+// CRLF bodies stay valid, keep their raw-response hash, and preserve line endings.
+{
+  const p = plan();
+  const crlf = valid.replaceAll("\n", "\r\n");
+  output = { choices: [{ message: { content: crlf }, finish_reason: "stop" }] };
+  const response = await executeCoveredReview(requestFor(p), p.coverage, "v1", request => openaiProvider.create(request, "fake"));
+  assert.equal(p.coverage.assessment?.state, "completed", "crlf");
+  assert.equal(p.coverage.assessment?.responseSha256, sha256(crlf), "crlf: the hash covers the raw response");
+  assert.equal(response.text, crlf, "crlf: normalized text preserves the original line endings");
+  assert.equal(validReviewResponse(crlf), true, "crlf");
 }
 // The word Overall in a notes cell is not a second Overall row.
 {
@@ -597,7 +621,7 @@ for (const [name, text] of [
   assert.equal(reviewResponseValidationError(valid.replace("| Consistency | 5/5 | Consistent |", "| Consistency | 5/5 | Consistent |\n| **Overall** | **5/5** | Twice |")), "Overall score missing, duplicated or malformed");
 }
 // A second heading is still a duplicate after canonicalization.
-assert.equal(reviewResponseValidationError(valid.replace("### Summary", "## 🐙 Octopus Review: again\n\n### Summary")), "Review headings missing or duplicated");
+assert.equal(reviewResponseValidationError(valid.replace("### Summary", "## 🐙 Octopus Review: again\n\n### Summary")), "Review heading duplicated");
 // Lone UTF-16 surrogates in review input are replaced before the receipt is taken, so the receipt still records preserved input. Paired surrogates (real emoji) survive.
 {
   const p = plan();

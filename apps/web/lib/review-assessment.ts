@@ -147,31 +147,119 @@ function scoreStructure(text: string) {
   });
 }
 
+// Heading typography models vary without changing the review's meaning. These
+// patterns only match a heading line outside fenced code; they never invent a
+// missing section or merge two headings.
+const REPORT_HEADING_LINE = /^#{1,3}[ \t]+(?:🐙[ \t]*)?Octopus[ \t]+(?:Code[ \t]+)?Review[ \t]*(?:[^\p{L}\p{N}\s][^\n]*)?$/iu;
+const SUMMARY_HEADING_LINE = /^#{1,3}[ \t]+(?:📝[ \t]*)?Summary(?:[ \t]+of[ \t]+Changes)?[ \t]*:?[ \t]*(?:#+[ \t]*)?$/i;
+const SCORE_HEADING_LINE = /^#{1,3}[ \t]+(?:📊[ \t]*)?Scores?(?:[ \t]+(?:Breakdown|Table))?[ \t]*:?[ \t]*(?:#+[ \t]*)?$/i;
+const FINDINGS_SUMMARY_HEADING_LINE = /^#{1,3}[ \t]+(?:🔍[ \t]*)?Findings[ \t]+Summary[ \t]*:?[ \t]*(?:#+[ \t]*)?$/i;
+const ANY_HEADING_LINE = /^#{1,6}[ \t]/;
+const FENCE_LINE = /^[ \t]{0,3}(`{3,}|~{3,})/;
+
+/** Normalize one score-table row (slash spacing and the bold Overall row). */
+function normalizeScoreRow(line: string): string {
+  const cells = scoreCells(line);
+  if (cells.length !== 5) return line;
+  const label = cells[1]?.trim().replaceAll("**", "");
+  if (!label || !SCORE_CATEGORIES.some(category => category === label)) return line;
+  cells[2] = cells[2].replace(/^(\s*(?:\*\*)?)([1-5])[ \t]*\/[ \t]*5((?:\*\*)?\s*)$/, "$1$2/5$3");
+  if (label === "Overall") {
+    const token = cells[2].trim().replaceAll("**", "");
+    if (/^(?:[1-5]\/5|N\/A|Not assessed)$/.test(token)) {
+      const leading = /^\s*/.exec(cells[2])?.[0] ?? " ";
+      const trailing = /\s*$/.exec(cells[2])?.[0] ?? " ";
+      cells[1] = " **Overall** ";
+      cells[2] = `${leading}**${token}**${trailing}`;
+    }
+  }
+  return cells.join("|");
+}
+
 /**
  * Canonicalize presentation shapes that models vary without changing the meaning of the
- * review, so validation judges structure rather than typography: a suffix on
- * the report heading (`## 🐙 Octopus Review — PR #12`) and an Overall row whose
- * two cells are not both bold, and horizontal spacing around score slashes.
+ * review, so validation judges structure rather than typography. Rewrites only heading
+ * lines and score-table rows outside fenced code: a report heading suffix or level,
+ * `Summary`/`Score`/`Findings Summary` heading case, emoji, level or ATX closing marks,
+ * horizontal spacing around score slashes, and an Overall row whose cells are not bold.
+ * It never adds a missing section or merges duplicate substantive headings.
  */
 export function normalizeReviewResponse(text: string): string {
-  return text
-    .replace(/(^### Score[ \t]*\r?\n)([\s\S]*?)(?=^#{1,6} |(?![\s\S]))/gm, (_section, heading: string, body: string) => heading + body.split("\n").map(line => {
-      const cells = scoreCells(line);
-      if (cells.length !== 5 || !SCORE_CATEGORIES.some(category => cells[1].trim().replaceAll("**", "") === category)) return line;
-      cells[2] = cells[2].replace(/^(\s*(?:\*\*)?)([1-5])[ \t]*\/[ \t]*5((?:\*\*)?\s*)$/, "$1$2/5$3");
-      return cells.join("|");
-    }).join("\n"))
-    .replace(/^## 🐙 Octopus Review\b[^\n]*$/gm, REVIEW_HEADING)
-    .replace(/^\|\s*(?:\*\*)?Overall(?:\*\*)?\s*\|\s*(?:\*\*)?([1-5]\/5|N\/A|Not assessed)(?:\*\*)?\s*\|([^\n]*)$/gm, "| **Overall** | **$1** |$2");
+  const source = text.replace(/^\uFEFF/, "");
+  const eol = source.includes("\r\n") ? "\r\n" : "\n";
+  const normalized: string[] = [];
+  let fence: string | null = null;
+  let inScore = false;
+  for (const line of source.split(/\r?\n/)) {
+    const fenceLine = FENCE_LINE.exec(line);
+    if (fenceLine) {
+      if (fence === null) fence = fenceLine[1][0];
+      else if (fenceLine[1][0] === fence) fence = null;
+      normalized.push(line);
+      continue;
+    }
+    if (fence !== null) { normalized.push(line); continue; }
+    if (REPORT_HEADING_LINE.test(line)) { normalized.push(REVIEW_HEADING); inScore = false; continue; }
+    if (SUMMARY_HEADING_LINE.test(line)) { normalized.push("### Summary"); inScore = false; continue; }
+    if (SCORE_HEADING_LINE.test(line)) { normalized.push("### Score"); inScore = true; continue; }
+    if (FINDINGS_SUMMARY_HEADING_LINE.test(line)) { normalized.push("### Findings Summary"); inScore = false; continue; }
+    if (ANY_HEADING_LINE.test(line)) { normalized.push(line); inScore = false; continue; }
+    normalized.push(inScore ? normalizeScoreRow(line) : line);
+  }
+  return normalized.join(eol);
+}
+
+type HeadingScan = {
+  report: number;
+  summary: number;
+  score: number;
+  findingsSummary: number;
+  index: { report: number; summary: number; score: number; findingsSummary: number };
+};
+
+/** Count canonical headings outside fenced code so a code sample cannot fake a section. */
+function headingScan(text: string): HeadingScan {
+  const scan: HeadingScan = { report: 0, summary: 0, score: 0, findingsSummary: 0,
+    index: { report: -1, summary: -1, score: -1, findingsSummary: -1 } };
+  let fence: string | null = null;
+  text.split(/\r?\n/).forEach((line, lineIndex) => {
+    const fenceLine = FENCE_LINE.exec(line);
+    if (fenceLine) {
+      if (fence === null) fence = fenceLine[1][0];
+      else if (fenceLine[1][0] === fence) fence = null;
+      return;
+    }
+    if (fence !== null) return;
+    const mark = (key: keyof HeadingScan["index"]) => {
+      scan[key]++;
+      if (scan.index[key] < 0) scan.index[key] = lineIndex;
+    };
+    if (/^## 🐙 Octopus Review[ \t]*$/.test(line)) mark("report");
+    else if (/^### Summary[ \t]*$/.test(line)) mark("summary");
+    else if (/^### Score[ \t]*$/.test(line)) mark("score");
+    else if (/^### Findings Summary[ \t]*$/.test(line)) mark("findingsSummary");
+  });
+  return scan;
 }
 
 /** Fixed diagnostic messages only: never include untrusted response excerpts. */
 export function reviewResponseValidationError(text: string, inputComplete = true): string | null {
   text = normalizeReviewResponse(text);
-  if ((text.match(/^## 🐙 Octopus Review[ \t]*\r?$/gm) ?? []).length !== 1
-    || (text.match(/^### Score[ \t]*\r?$/gm) ?? []).length !== 1
-    || (text.match(/^### Summary[ \t]*\r?$/gm) ?? []).length !== 1
-    || !/^### Summary[ \t]*\r?\n\s*\S/m.test(text)) return "Review headings missing or duplicated";
+  const headings = headingScan(text);
+  if (headings.report === 0) return "Review heading missing";
+  if (headings.report > 1) return "Review heading duplicated";
+  if (headings.summary === 0) return "Summary heading missing";
+  if (headings.summary > 1) return "Summary heading duplicated";
+  if (headings.score === 0) return "Score heading missing";
+  if (headings.score > 1) return "Score heading duplicated";
+  if (headings.findingsSummary === 0) return "Findings Summary heading missing";
+  if (headings.findingsSummary > 1) return "Findings Summary heading duplicated";
+  const { index } = headings;
+  if (!(index.report < index.summary && index.summary < index.score && index.score < index.findingsSummary)) {
+    return "Review heading structure malformed";
+  }
+  const summaryBody = /^### Summary[ \t]*\r?\n([\s\S]*?)(?=^#{1,6}[ \t]|(?![\s\S]))/m.exec(text)?.[1] ?? "";
+  if (!summaryBody.trim()) return "Summary section is empty";
   const score = scoreSection(text);
   if ((score.match(/^\|[ \t]*Category[ \t]*\|[ \t]*Score[ \t]*\|[ \t]*Notes[ \t]*\|[ \t]*\r?$/gm) ?? []).length !== 1) return "Score table header missing or duplicated";
   for (const category of ["Security", "Code Quality", "Performance", "Error Handling", "Consistency"]) {
@@ -195,6 +283,50 @@ export function validReviewResponse(text: string): boolean {
   return reviewResponseValidationError(text) === null;
 }
 
+/** Lines outside fenced code, in order. */
+function visibleLines(text: string): string[] {
+  const visible: string[] = [];
+  let fence: string | null = null;
+  for (const line of text.split(/\r?\n/)) {
+    const fenceLine = FENCE_LINE.exec(line);
+    if (fenceLine) {
+      if (fence === null) fence = fenceLine[1][0];
+      else if (fenceLine[1][0] === fence) fence = null;
+      continue;
+    }
+    if (fence === null) visible.push(line);
+  }
+  return visible;
+}
+
+/** Locate the one real Findings Summary section; ignore headings inside code fences. */
+function findingsSummarySection(text: string): { headings: number; section: string | null } {
+  const lines = text.split(/\r?\n/);
+  const visible: boolean[] = [];
+  let fence: string | null = null;
+  for (const line of lines) {
+    const fenceLine = FENCE_LINE.exec(line);
+    if (fenceLine) {
+      if (fence === null) fence = fenceLine[1][0];
+      else if (fenceLine[1][0] === fence) fence = null;
+      visible.push(false);
+      continue;
+    }
+    visible.push(fence === null);
+  }
+  const headings = lines.flatMap((line, index) => visible[index] && /^### Findings Summary[ \t]*$/.test(line) ? [index] : []);
+  if (headings.length !== 1) return { headings: headings.length, section: null };
+  let end = lines.length;
+  for (let index = headings[0] + 1; index < lines.length; index++) {
+    if (!visible[index]) continue;
+    if (ANY_HEADING_LINE.test(lines[index]) || lines[index].includes("<!-- OCTOPUS_FINDINGS_START -->")) {
+      end = index;
+      break;
+    }
+  }
+  return { headings: 1, section: lines.slice(headings[0] + 1, end).join("\n") };
+}
+
 function reviewFindingsValidationError(text: string): string | null {
   const matches = [...text.matchAll(/<!-- OCTOPUS_FINDINGS_START -->\s*([\s\S]*?)\s*<!-- OCTOPUS_FINDINGS_END -->/g)];
   if (matches.length !== 1
@@ -214,12 +346,13 @@ function reviewFindingsValidationError(text: string): string | null {
   // Count headings and table headers outside JSON so another section cannot hide
   // a second summary table. The table itself ends before a standalone advisory.
   const presentation = text.replace(matches[0][0], "");
-  const summaries = [...text.matchAll(/^### Findings Summary[ \t]*\r?\n([\s\S]*?)(?=^#{1,6} |<!-- OCTOPUS_FINDINGS_START -->|(?![\s\S]))/gm)];
-  if (summaries.length !== 1
-    || (presentation.match(/^[ \t]*#{1,6}[ \t]+Findings Summary[ \t]*\r?$/gm) ?? []).length !== 1) return "Findings Summary heading missing or duplicated";
-  const lines = summaries[0][1].trim().split("\n").map(line => line.trim());
-  const header = /^[ \t]*\|[ \t]*Severity[ \t]*\|[ \t]*Count[ \t]*\|[ \t]*\r?$/gm;
-  if ((presentation.match(header) ?? []).length !== 1
+  const findingsHeading = findingsSummarySection(text);
+  if (findingsHeading.headings === 0) return "Findings Summary heading missing";
+  if (findingsHeading.headings > 1) return "Findings Summary heading duplicated";
+  if (findingsHeading.section === null) return "Findings Summary heading structure malformed";
+  const lines = findingsHeading.section.trim().split("\n").map(line => line.trim());
+  const header = /^[ \t]*\|[ \t]*Severity[ \t]*\|[ \t]*Count[ \t]*\|[ \t]*\r?$/;
+  if (visibleLines(presentation).filter(line => header.test(line)).length !== 1
     || !/^\|\s*Severity\s*\|\s*Count\s*\|$/.test(lines[0] ?? "")
     || !/^\|\s*:?-{3,}:?\s*\|\s*:?-{3,}:?\s*\|$/.test(lines[1] ?? "")) return "Findings Summary table header missing, duplicated or malformed";
   const counts = new Map<string, number>();
