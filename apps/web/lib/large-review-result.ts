@@ -12,7 +12,8 @@ import {
   createPullRequestReview as ghCreatePullRequestReview,
   updateCheckRun as ghUpdateCheckRun,
 } from "@/lib/github";
-import { parseFindings, parseFindingsFromJson } from "@/lib/review-dedup";
+import { parseFindingsFromJson } from "@/lib/review-dedup";
+import { parseReviewFindingsSet } from "@/lib/review-evidence";
 import { formatFailureSummary, formatLargeReviewSummary } from "@/lib/review-github-summary";
 import { findingSignature, mergeFindingsBySignature, inheritReviewIssueTriage } from "@/lib/finding-merge";
 import {
@@ -135,7 +136,12 @@ export async function handleLargeReviewResult(
     parseReviewConfig(org.defaultReviewConfig),
     parseReviewConfig(repo.reviewConfig),
   );
-  const parsedFindings = parseFindings(reviewBody);
+  // Strict structural validation: `parseReviewFindingsSet` accepts a valid
+  // empty array and rejects malformed or duplicated findings JSON, unlike the
+  // permissive markdown fallback in `parseFindings`.
+  const validatedFindings = data.error ? null : parseReviewFindingsSet(reviewBody);
+  const hasValidatedFindings = validatedFindings !== null;
+  const parsedFindings = hasValidatedFindings ? (parseFindingsFromJson(reviewBody) ?? []) : [];
   const { kept: findings, truncatedCount } = sortAndCapFindings(
     filterByConfidence(parsedFindings, resolveConfidenceThreshold(reviewConfig)),
     reviewConfig.maxFindings ?? MAX_FINDINGS_PER_REVIEW,
@@ -185,7 +191,7 @@ export async function handleLargeReviewResult(
   // The immutable result (and eligible current findings) must commit before
   // any final comment or native completion. Identical retries cannot promote
   // the same archive again or overwrite a replacement report.
-  await saveReviewAttempt(attemptId, pr.id, coverage, reviewBody, data.error ? undefined : merged, failureFingerprint);
+  await saveReviewAttempt(attemptId, pr.id, coverage, reviewBody, hasValidatedFindings ? merged : undefined, failureFingerprint);
   outcomeRecord.assessment(coverage, attemptId);
   if (coverage.nativeCheckId) {
     const result = reviewCheckResult(coverage, false, 0);
@@ -205,7 +211,6 @@ export async function handleLargeReviewResult(
   // Findings are only safe to publish when the archived body carries a valid
   // structured findings block. Otherwise the comment must not surface output
   // that was never validated as a findings set.
-  const hasValidatedFindings = !data.error && parseFindingsFromJson(reviewBody) !== null;
   const compactCommentBody = data.error
     ? applyReviewCoverage([
         "> 🐙 **Octopus Review** encountered an error while analyzing this large pull request.",

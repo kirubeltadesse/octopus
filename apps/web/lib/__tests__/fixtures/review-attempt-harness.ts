@@ -210,6 +210,7 @@ let failCheck = false;
 let failSummary = false;
 let summaryUpdateAttempts = 0;
 const published: unknown[][] = [];
+const reviewEvents: string[] = [];
 let allowPublication = false;
 let nativeOnlyFailure = false;
 let duringPublication: (() => Promise<void>) | undefined;
@@ -221,7 +222,7 @@ mock.module("@/lib/github", () => ({
   updateCheckRun: async (...args: unknown[]) => { assert.ok([...rows.values()].some(row => (row.coverage as { nativeCheckId?: string }).nativeCheckId === String(args[3])), "Native completion requires a durable archive"); checks.push(args); if (failCheck) throw new Error("Transient check failure"); },
   createPullRequestComment: async (...args: unknown[]) => { if (failSummary && String(args[4]).includes("## 🐙 Octopus Review")) throw new Error("Transient summary failure"); if (!allowPublication) unexpectedPublication(); await duringPublication?.(); published.push(args); return 900; },
   updatePullRequestComment: async (...args: unknown[]) => { if (!allowPublication) unexpectedPublication(); if (failSummary && String(args[4]).includes("## 🐙 Octopus Review") && ++summaryUpdateAttempts > 1) throw new Error("Transient summary failure"); await duringPublication?.(); published.push(args); },
-  createPullRequestReview: async (...args: unknown[]) => { if (failSummary || nativeOnlyFailure) throw new Error("Transient summary failure"); if (!allowPublication) unexpectedPublication(); published.push(args); return 901; },
+  createPullRequestReview: async (...args: unknown[]) => { if (failSummary || nativeOnlyFailure) throw new Error("Transient summary failure"); if (!allowPublication) unexpectedPublication(); reviewEvents.push(String(args[5])); published.push(args); return 901; },
 }));
 mock.module("@/lib/pubby", () => ({ pubby: { trigger: unexpectedPublication } }));
 mock.module("@/lib/events", () => ({ eventBus: { emit: unexpectedPublication } }));
@@ -649,3 +650,73 @@ const stageJob = { ...failureJob, attemptId: "23232323-2323-4323-8323-2323232323
 await handleLargeReviewResult(stageJob);
 assert.equal(current.errorMessage, stageJob.error, "known producer stages remain visible");
 console.log("PASS large-review errors stay private across fresh and archived retry paths");
+
+// Regression: a valid empty findings array is a successful review, while
+// malformed findings JSON must never gate on unvalidated markdown findings.
+const emptyJob = {
+  pullRequestId: "pr",
+  attemptId: "24242424-2424-4424-8424-242424242424",
+  headSha: currentHead,
+  baseSha: "d".repeat(40),
+  reviewRequestVersion: currentVersion,
+  reviewBody: [
+    "## 🐙 Octopus Review",
+    "",
+    "### Summary",
+    "No issues were found in the reviewed scope.",
+    "",
+    "### Findings Summary",
+    "",
+    "| Severity | Count |",
+    "| --- | --- |",
+    "",
+    "<!-- OCTOPUS_FINDINGS_START -->",
+    "[]",
+    "<!-- OCTOPUS_FINDINGS_END -->",
+  ].join("\n"),
+};
+const beforeEmptyPublications = published.length;
+const beforeEmptyEvents = reviewEvents.length;
+await handleLargeReviewResult(emptyJob);
+const emptyPublications = published.slice(beforeEmptyPublications);
+assert.ok(reviewEvents.slice(beforeEmptyEvents).every(event => event === "COMMENT"), "a valid empty findings array must not request changes");
+assert.ok(emptyPublications.some(call => String(call[4]).includes("No actionable findings")), "a valid empty findings array publishes a successful no-findings summary");
+assert.equal(rows.get(emptyJob.attemptId)?.reviewBody !== undefined, true);
+
+const malformedJob = {
+  pullRequestId: "pr",
+  attemptId: "25252525-2525-4525-8525-252525252525",
+  headSha: currentHead,
+  baseSha: "d".repeat(40),
+  reviewRequestVersion: currentVersion,
+  reviewBody: [
+    "## 🐙 Octopus Review",
+    "",
+    "### Summary",
+    "Claims a critical problem.",
+    "",
+    "### Findings Summary",
+    "",
+    "| Severity | Count |",
+    "| --- | --- |",
+    "| 🔴 | 1 |",
+    "",
+    "#### 🔴 Unvalidated critical finding",
+    "This markdown finding is not backed by valid structured JSON.",
+    "",
+    "<!-- OCTOPUS_FINDINGS_START -->",
+    "{ this is not valid json",
+    "<!-- OCTOPUS_FINDINGS_END -->",
+  ].join("\n"),
+};
+issues = [issue("prior finding")];
+const beforeMalformedPublications = published.length;
+const beforeMalformedEvents = reviewEvents.length;
+await handleLargeReviewResult(malformedJob);
+const malformedPublications = published.slice(beforeMalformedPublications);
+assert.ok(reviewEvents.slice(beforeMalformedEvents).every(event => event === "COMMENT"), "malformed findings must not request changes");
+assert.ok(malformedPublications.every(call => !String(call[4]).includes("Unvalidated critical finding")), "malformed findings are never published");
+assert.ok(malformedPublications.every(call => !String(call[4]).includes("Claims a critical problem")), "raw model prose is never published");
+assert.ok(malformedPublications.some(call => String(call[4]).includes("No unvalidated findings are shown")), "malformed findings publish the concise failure summary");
+assert.deepEqual(issues, [issue("prior finding")], "malformed findings do not wipe prior triage state");
+console.log("PASS large-review accepts empty findings arrays and never gates on malformed findings");
