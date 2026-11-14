@@ -131,7 +131,7 @@ async function startReviewFlowInternal(params: StartReviewParams, forgejoTransac
   console.log(`[webhook] PullRequest admitted — id: ${pr.id}, number: ${pr.number}`);
 
   if (forgejoTransaction) {
-    const jobId = await enqueue("process-review", { pullRequestId: pr.id }, {
+    const jobId = await enqueue("process-review", { pullRequestId: pr.id, reviewRequestVersion: pr.reviewRequestVersion }, {
       db: { executeSql: async (sql, values) => ({ rows: await forgejoTransaction.$queryRawUnsafe<unknown[]>(sql, ...(values ?? [])) }) },
     });
     if (!jobId) throw new Error("Forgejo review could not be queued");
@@ -189,7 +189,7 @@ async function startReviewFlowInternal(params: StartReviewParams, forgejoTransac
 
   // Enqueue review job — pg-boss persists it in DB, survives container restarts
   try {
-    await enqueue("process-review", { pullRequestId: pr.id });
+    await enqueue("process-review", { pullRequestId: pr.id, reviewRequestVersion: pr.reviewRequestVersion });
   } catch (error) {
     // Release only this admission. A provider retry must not be suppressed as
     // already in progress when the durable queue never accepted the job.

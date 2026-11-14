@@ -72,6 +72,7 @@ export async function deferReviewForRepository(pullRequestId: string, headSha?: 
   // again until its stale timeout. A prerequisite retry must be claimable now.
   const changed = await prisma.pullRequest.updateMany({ where: { id: pullRequestId, ...(headSha !== undefined ? { headSha } : {}), ...(reviewRequestVersion !== undefined ? { reviewRequestVersion } : {}) }, data: { status: "pending" } });
   if (!changed.count) return;
-  const jobId = await enqueueAfter("process-review", { pullRequestId }, 30);
+  const jobId = await enqueueAfter("process-review",
+    reviewRequestVersion === undefined ? { pullRequestId } : { pullRequestId, reviewRequestVersion }, 30);
   if (!jobId) throw new Error("Could not enqueue review after repository preparation");
 }

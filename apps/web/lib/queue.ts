@@ -237,14 +237,20 @@ export async function enqueue<T extends object>(
  * Active jobs keep running (pg-boss cannot abort a handler) and are fenced by
  * the persisted cancellation status instead. Returns the number cancelled.
  */
-export async function cancelQueuedReviewJobs(pullRequestId: string): Promise<number> {
+export async function cancelQueuedReviewJobs(pullRequestId: string, reviewRequestVersion: number): Promise<number> {
   if (!started) await startQueue();
   const boss = getBoss();
   let cancelled = 0;
+  // Scope by request version so cleanup can never delete a newer request's job.
   for (const queue of ["process-review", "process-large-review", "post-large-review-result"]) {
     try {
-      const jobs = await boss.findJobs<{ pullRequestId: string }>(queue, { data: { pullRequestId } });
-      const ids = jobs.filter(job => job.state === "created" || job.state === "retry").map(job => job.id);
+      const jobs = await boss.findJobs<{ pullRequestId: string; reviewRequestVersion?: number }>(queue, {
+        data: { pullRequestId, reviewRequestVersion },
+      });
+      const ids = jobs
+        .filter(job => job.data.reviewRequestVersion === reviewRequestVersion)
+        .filter(job => job.state === "created" || job.state === "retry")
+        .map(job => job.id);
       if (ids.length === 0) continue;
       await boss.cancel(queue, ids);
       cancelled += ids.length;

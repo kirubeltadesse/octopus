@@ -1099,7 +1099,7 @@ if (crashRecovery) {
   deliveries.get(attempt.id)!.leaseUntil = new Date(Date.now() + 60_000);
   await processReview("pr");
   assert.deepEqual([summaries.length, checkConclusions.length, delayedJobs.length], [0, 0, 1]);
-  assert.deepEqual(delayedJobs[0].slice(0, 2), ["process-review", { pullRequestId: "pr" }]);
+  assert.deepEqual(delayedJobs[0].slice(0, 2), ["process-review", { pullRequestId: "pr", reviewRequestVersion: pr.reviewRequestVersion }]);
   // A large-PR result (no assessment) is delivered by its own job, never from here.
   stopped();
   const assessed = attempt.coverage;

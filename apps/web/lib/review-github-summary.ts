@@ -79,8 +79,13 @@ export function extractOverallScore(body: string | null | undefined): number | n
 /** Merge readiness comes from the assessment and check conclusion, never the score. */
 export function reviewVerdict(coverage: ReviewCoverage, conclusion: CheckConclusion): ReviewVerdict {
   if (reviewAssessmentComplete(coverage) && coverage.assessment?.state === "not-required") return "No review required";
+  // Only a completed, validated assessment can authorize a merge verdict.
+  // Incomplete, invalid, cancelled, timed-out and neutral outcomes never imply
+  // the PR is ready.
   if (!reviewAssessmentComplete(coverage) || coverage.assessment?.state !== "completed") return "Not assessed";
-  return conclusion === "failure" ? "Changes required" : "Ready to merge";
+  if (conclusion === "success") return "Ready to merge";
+  if (conclusion === "failure") return "Changes required";
+  return "Not assessed";
 }
 
 export function formatReviewScore(score: number | null): string {

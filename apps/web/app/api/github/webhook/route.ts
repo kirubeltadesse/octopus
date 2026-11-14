@@ -501,7 +501,6 @@ export async function POST(request: NextRequest) {
           prNumber,
           prHeadSha: headSha || null,
           commentAuthor: payload.comment?.user?.login ?? "",
-          authorAssociation: payload.comment?.author_association ?? null,
         });
         await createPullRequestComment(installationId, owner, repoName, prNumber, cancel.body)
           .catch((err) => console.error("[webhook] Failed to acknowledge cancellation:", err));

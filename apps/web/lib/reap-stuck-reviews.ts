@@ -57,6 +57,7 @@ async function reconcileCheck(pr: ReapRow, conclusion: "cancelled" | "timed_out"
     await reconcileReviewCheck({
       installationId, fullName: repo.fullName, headSha: pr.headSha,
       pullRequestId: pr.id, reviewRequestVersion: pr.reviewRequestVersion, conclusion,
+      legacyNotAfter: pr.updatedAt,
     });
   } catch (error) {
     // The row stays failed/cancelled; the next sweep retries this PATCH. Never
@@ -120,7 +121,7 @@ export async function reapStuckReviews(
     if (pr.createdAt && pr.createdAt > requeueCutoff) {
       await enqueue(
         "process-review",
-        { pullRequestId: pr.id },
+        { pullRequestId: pr.id, reviewRequestVersion: pr.reviewRequestVersion },
         { singletonKey: `reap:${pr.id}`, singletonSeconds: 3600 },
       );
       requeued++;
@@ -138,7 +139,7 @@ export async function reapStuckReviews(
       repository: { provider: "github" },
     },
     select: {
-      id: true, status: true, headSha: true, reviewRequestVersion: true,
+      id: true, status: true, updatedAt: true, headSha: true, reviewRequestVersion: true,
       repository: { select: { provider: true, fullName: true, installationId: true, organization: { select: { githubInstallationId: true } } } },
     },
     take: CHECK_RECONCILE_BATCH,

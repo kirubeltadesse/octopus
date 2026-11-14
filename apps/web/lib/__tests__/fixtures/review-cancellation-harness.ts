@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 mock.module("server-only", () => ({}));
 
-type Row = { id: string; headSha: string | null; reviewRequestVersion: number; status: string };
+type Row = { id: string; headSha: string | null; reviewRequestVersion: number; status: string; updatedAt: Date };
 let row: Row | null = null;
 
 mock.module("@octopus/db", () => ({
@@ -44,10 +44,10 @@ mock.module("@/lib/github", () => ({
   },
 }));
 
-let queuedCancellations = 0;
+const queuedCancellations: { pullRequestId: string; reviewRequestVersion: number }[] = [];
 mock.module("@/lib/queue", () => ({
-  cancelQueuedReviewJobs: async () => {
-    queuedCancellations++;
+  cancelQueuedReviewJobs: async (pullRequestId: string, reviewRequestVersion: number) => {
+    queuedCancellations.push({ pullRequestId, reviewRequestVersion });
     return 2;
   },
 }));
@@ -56,7 +56,7 @@ const { cancelReviewRequest, handleReviewCancelCommand, isReviewRequestCancelled
 const { reconcileReviewCheck } = await import("../../review-check-reconciliation");
 
 const head = "a".repeat(40);
-const base = { id: "pr", headSha: head, reviewRequestVersion: 1, status: "pending" };
+const base = { id: "pr", headSha: head, reviewRequestVersion: 1, status: "pending", updatedAt: new Date("2026-01-01T00:00:00Z") };
 
 function reset(overrides: Partial<Row> = {}) {
   row = { ...base, ...overrides };
@@ -64,27 +64,27 @@ function reset(overrides: Partial<Row> = {}) {
   checkStatus = "in_progress";
   checkLookupError = false;
   checkUpdates.length = 0;
-  queuedCancellations = 0;
+  queuedCancellations.length = 0;
 }
 
 {
   reset();
   const result = await handleReviewCancelCommand({
     installationId: 1, owner: "owner", repoName: "repo", repoId: "repo-db", prNumber: 1,
-    prHeadSha: head, commentAuthor: "alice", authorAssociation: "MEMBER",
+    prHeadSha: head, commentAuthor: "alice",
   });
   assert.equal(result.authorized, true);
   assert.equal(result.outcome?.outcome, "cancelled");
   assert.ok(result.body.includes("queued review"), result.body);
   assert.ok(result.body.includes("aaaaaaa"), result.body);
   assert.equal(row?.status, "cancelled");
-  assert.equal(queuedCancellations, 1);
+  assert.deepEqual(queuedCancellations, [{ pullRequestId: "pr", reviewRequestVersion: 1 }]);
   assert.deepEqual(checkUpdates, [{ id: 77, conclusion: "cancelled" }]);
   assert.equal(await isReviewRequestCancelled("pr", head, 1), true);
 
   const duplicate = await handleReviewCancelCommand({
     installationId: 1, owner: "owner", repoName: "repo", repoId: "repo-db", prNumber: 1,
-    prHeadSha: head, commentAuthor: "alice", authorAssociation: "MEMBER",
+    prHeadSha: head, commentAuthor: "alice",
   });
   assert.equal(duplicate.outcome?.outcome, "already_cancelled");
   assert.ok(duplicate.body.includes("already cancelled"), duplicate.body);
@@ -96,7 +96,7 @@ console.log("PASS pending cancellation, acknowledgement and duplicate handling")
   reset({ status: "reviewing", reviewRequestVersion: 2 });
   const result = await handleReviewCancelCommand({
     installationId: 1, owner: "owner", repoName: "repo", repoId: "repo-db", prNumber: 1,
-    prHeadSha: head, commentAuthor: "alice", authorAssociation: "MEMBER",
+    prHeadSha: head, commentAuthor: "alice",
   });
   assert.equal(result.outcome?.outcome, "cancelled");
   assert.ok(result.body.includes("running review"), result.body);
@@ -109,28 +109,41 @@ console.log("PASS running cancellation");
   permission = "read";
   const denied = await handleReviewCancelCommand({
     installationId: 1, owner: "owner", repoName: "repo", repoId: "repo-db", prNumber: 1,
-    prHeadSha: head, commentAuthor: "reader", authorAssociation: "CONTRIBUTOR",
+    prHeadSha: head, commentAuthor: "reader",
   });
   assert.equal(denied.authorized, false);
   assert.ok(denied.body.includes("write, maintain, or admin"), denied.body);
   assert.equal(row?.status, "pending");
   assert.equal(checkUpdates.length, 0);
+  assert.equal(queuedCancellations.length, 0);
 
+  permission = "none";
+  const noAccess = await handleReviewCancelCommand({
+    installationId: 1, owner: "owner", repoName: "repo", repoId: "repo-db", prNumber: 1,
+    prHeadSha: head, commentAuthor: "outsider",
+  });
+  assert.equal(noAccess.authorized, false);
+
+  // Verification unavailable must deny, even for an owner-like association.
   permission = null;
-  const associationDenied = await handleReviewCancelCommand({
+  const unverified = await handleReviewCancelCommand({
     installationId: 1, owner: "owner", repoName: "repo", repoId: "repo-db", prNumber: 1,
-    prHeadSha: head, commentAuthor: "contributor", authorAssociation: "CONTRIBUTOR",
+    prHeadSha: head, commentAuthor: "owner",
   });
-  assert.equal(associationDenied.authorized, false);
+  assert.equal(unverified.authorized, false);
+  assert.ok(unverified.body.includes("could not verify"), unverified.body);
+  assert.equal(row?.status, "pending");
 
-  const associationAllowed = await handleReviewCancelCommand({
+  permission = "maintain";
+  const maintainer = await handleReviewCancelCommand({
     installationId: 1, owner: "owner", repoName: "repo", repoId: "repo-db", prNumber: 1,
-    prHeadSha: head, commentAuthor: "collaborator", authorAssociation: "COLLABORATOR",
+    prHeadSha: head, commentAuthor: "maintainer",
   });
-  assert.equal(associationAllowed.authorized, true);
+  assert.equal(maintainer.authorized, true);
   assert.equal(row?.status, "cancelled");
+  assert.deepEqual(queuedCancellations.at(-1), { pullRequestId: "pr", reviewRequestVersion: 1 });
 }
-console.log("PASS authorization by permission and signed association fallback");
+console.log("PASS authorization requires verified write, maintain or admin access");
 
 {
   reset({ reviewRequestVersion: 7, status: "pending" });
@@ -141,6 +154,7 @@ console.log("PASS authorization by permission and signed association fallback");
   assert.equal(outcome.outcome, "request_changed");
   assert.equal(row?.status, "pending", "a newer request must survive a stale cancellation");
   assert.equal(row?.reviewRequestVersion, 7);
+  assert.equal(queuedCancellations.length, 0, "stale cancellation must not clean up a newer job");
 }
 console.log("PASS stale cancellation never cancels a newer request");
 
@@ -158,6 +172,7 @@ console.log("PASS stale cancellation never cancels a newer request");
   assert.equal(outcome.outcome, "cancelled");
   assert.equal(row?.status, "cancelled");
   assert.equal(checkUpdates.length, 0, "a transient check failure must not un-cancel the request");
+  assert.deepEqual(queuedCancellations, [{ pullRequestId: "pr", reviewRequestVersion: 3 }]);
 
   checkLookupError = false;
   checkStatus = "in_progress";

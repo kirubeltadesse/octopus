@@ -666,7 +666,7 @@ export async function processReview(pullRequestId: string, executionWindow?: Rev
   if (!attempt || attempt.delivery?.completedAt || attempt.reviewBody !== pr.reviewBody || !coverage?.assessment) return;
   if (attempt.delivery?.leaseUntil && attempt.delivery.leaseUntil > new Date()) {
     // Its publisher may still be running; look again once that lease has passed.
-    await enqueueAfter("process-review", { pullRequestId: pr.id }, 330);
+    await enqueueAfter("process-review", { pullRequestId: pr.id, reviewRequestVersion: pr.reviewRequestVersion }, 330);
     return;
   }
   const [owner, repoName] = repo.fullName.split("/");
@@ -1256,7 +1256,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
         );
         await updateCurrentReview(pr.id, pr.headSha, pr.reviewRequestVersion, { status: "queued", updatedAt: new Date() });
         outcomeDeferred = true;
-        await enqueueAfter("process-review", { pullRequestId: pr.id }, 30);
+        await enqueueAfter("process-review", { pullRequestId: pr.id, reviewRequestVersion: pr.reviewRequestVersion }, 30);
         return;
       }
     }

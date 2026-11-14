@@ -70,7 +70,7 @@ describe("reapStuckReviews", () => {
     });
     expect(enqueue).toHaveBeenCalledWith(
       "process-review",
-      { pullRequestId: "pr_recent" },
+      { pullRequestId: "pr_recent", reviewRequestVersion: 1 },
       { singletonKey: "reap:pr_recent", singletonSeconds: 3600 },
     );
   });
@@ -97,6 +97,7 @@ describe("reapStuckReviews", () => {
     expect(reconcile).toHaveBeenCalledWith({
       installationId: 123, fullName: "owner/repo", headSha: "a".repeat(40),
       pullRequestId: "pr_gh", reviewRequestVersion: 1, conclusion: "timed_out",
+      legacyNotAfter: minutesAgo(30),
     });
   });
 

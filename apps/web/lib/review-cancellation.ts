@@ -10,8 +10,6 @@ export type ActiveReviewStatus = (typeof ACTIVE_REVIEW_STATUSES)[number];
 export const isActiveReviewStatus = (status: string): status is ActiveReviewStatus =>
   (ACTIVE_REVIEW_STATUSES as readonly string[]).includes(status);
 
-/** Repository associations allowed to cancel when the permission API is unavailable. */
-const CANCEL_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const CANCEL_PERMISSIONS = new Set(["admin", "maintain", "write"]);
 
 export type ReviewRequestSnapshot = {
@@ -51,6 +49,8 @@ export async function cancelReviewRequest(params: {
   snapshot: ReviewRequestSnapshot;
   installationId?: number | null;
   fullName?: string | null;
+  /** Upper bound for recovering legacy checks that predate external_id. */
+  legacyNotAfter?: Date | null;
 }): Promise<CancelReviewOutcome> {
   const { pullRequestId, snapshot } = params;
   let current = snapshot;
@@ -74,7 +74,7 @@ export async function cancelReviewRequest(params: {
       // Lazy so importing the cancellation helpers does not force every caller
       // (and test fixture) to provide the queue implementation.
       const queuedJobs = await import("@/lib/queue")
-        .then(module => module.cancelQueuedReviewJobs(pullRequestId))
+        .then(module => module.cancelQueuedReviewJobs(pullRequestId, current.reviewRequestVersion))
         .catch(() => 0);
       if (params.installationId && params.fullName) {
         await reconcileReviewCheck({
@@ -84,6 +84,7 @@ export async function cancelReviewRequest(params: {
           pullRequestId,
           reviewRequestVersion: current.reviewRequestVersion,
           conclusion: "cancelled",
+          legacyNotAfter: params.legacyNotAfter ?? undefined,
         }).catch(error => console.warn("[review-cancellation] Failed to update the check run; the reaper will retry:", error instanceof Error ? error.message : "unknown error"));
       }
       return {
@@ -145,9 +146,9 @@ function acknowledgement(body: string): string {
 export type CancelCommandResult = { authorized: boolean; body: string; outcome?: CancelReviewOutcome };
 
 /**
- * Handle an authenticated `@octopus cancel` command. Authorization uses the
- * collaborator permission API when the App can read it, falling back to the
- * signed webhook's author_association for installations without Administration.
+ * Handle an authenticated `@octopus cancel` command. The commenter's GitHub
+ * repository permission is verified before any state changes; when that
+ * verification is unavailable the command is denied rather than guessed.
  */
 export async function handleReviewCancelCommand(params: {
   installationId: number;
@@ -157,16 +158,20 @@ export async function handleReviewCancelCommand(params: {
   prNumber: number;
   prHeadSha: string | null;
   commentAuthor: string;
-  authorAssociation?: string | null;
 }): Promise<CancelCommandResult> {
+  // Only verified repository permissions authorize a cancellation. The signed
+  // webhook's author_association is not proof of write access and is never used
+  // as a fallback: when verification is unavailable we deny safely.
   const permission = params.commentAuthor
     ? await github.getCollaboratorPermission(params.installationId, params.owner, params.repoName, params.commentAuthor)
     : null;
-  const association = (params.authorAssociation ?? "").toUpperCase();
-  const authorized = permission
-    ? CANCEL_PERMISSIONS.has(permission.toLowerCase())
-    : CANCEL_ASSOCIATIONS.has(association);
-  if (!authorized) {
+  if (permission === null) {
+    return {
+      authorized: false,
+      body: acknowledgement("could not verify your repository permission, so the review was not cancelled."),
+    };
+  }
+  if (!CANCEL_PERMISSIONS.has(permission.toLowerCase())) {
     return {
       authorized: false,
       body: acknowledgement("only users with write, maintain, or admin access can cancel reviews."),
@@ -175,7 +180,7 @@ export async function handleReviewCancelCommand(params: {
 
   const row = await prisma.pullRequest.findUnique({
     where: { repositoryId_number: { repositoryId: params.repoId, number: params.prNumber } },
-    select: { id: true, headSha: true, reviewRequestVersion: true, status: true },
+    select: { id: true, headSha: true, reviewRequestVersion: true, status: true, updatedAt: true },
   });
   if (!row) {
     return {
@@ -189,6 +194,7 @@ export async function handleReviewCancelCommand(params: {
     snapshot: { headSha: row.headSha, reviewRequestVersion: row.reviewRequestVersion, status: row.status },
     installationId: params.installationId,
     fullName: `${params.owner}/${params.repoName}`,
+    legacyNotAfter: row.updatedAt,
   });
 
   switch (outcome.outcome) {

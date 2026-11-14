@@ -368,11 +368,13 @@ export async function getCollaboratorPermission(
   }
 }
 
-type GitHubCheckRun = {
+export type GitHubCheckRun = {
   id: number;
   status: string;
   conclusion?: string | null;
   external_id?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
   app?: { id: number } | null;
 };
 
@@ -401,8 +403,35 @@ async function listCheckRuns(
 }
 
 /**
+ * Select the check run for one review request. An exact external_id match wins.
+ * When legacy runs created before external_id was available are allowed, only a
+ * single unfinished candidate started no later than the request's cutoff is
+ * selected; multiple candidates are ambiguous and nothing is guessed. Completed
+ * runs are never selected for legacy recovery.
+ */
+export function selectCheckRunForRequest(
+  runs: GitHubCheckRun[],
+  appId: string | number,
+  externalId: string,
+  legacyNotAfter?: Date,
+): GitHubCheckRun | null {
+  const own = runs.filter(run => String(run.app?.id) === String(appId));
+  const exact = own.filter(run => run.external_id === externalId);
+  if (exact.length > 0) return exact.find(run => run.status !== "completed") ?? exact[0];
+  if (!legacyNotAfter) return null;
+  const cutoff = legacyNotAfter.getTime() + 2 * 60_000;
+  const legacy = own.filter(run => {
+    if (run.external_id || run.status === "completed" || !run.started_at) return false;
+    const started = Date.parse(run.started_at);
+    return Number.isFinite(started) && started <= cutoff;
+  });
+  return legacy.length === 1 ? legacy[0] : null;
+}
+
+/**
  * Find this App's check run for one review request. Returns null when no run
- * exists; throws on API failure so a reconciliation sweep can retry.
+ * exists or legacy recovery is ambiguous; throws on API failure so a
+ * reconciliation sweep can retry.
  */
 export async function findCheckRunByExternalId(
   installationId: number,
@@ -411,11 +440,12 @@ export async function findCheckRunByExternalId(
   headSha: string,
   name: string,
   externalId: string,
+  legacyNotAfter?: Date,
 ): Promise<GitHubCheckRun | null> {
   const config = await getGithubAppConfig();
   if (!config) throw new Error("GitHub App is not configured for check reconciliation");
   const runs = await listCheckRuns(installationId, owner, repo, headSha, name);
-  return runs.find(run => String(run.app?.id) === String(config.appId) && run.external_id === externalId) ?? null;
+  return selectCheckRunForRequest(runs, config.appId, externalId, legacyNotAfter);
 }
 
 export async function createCheckRun(

@@ -42,6 +42,9 @@ export function buildAppManifest(baseUrl: string, name: string) {
       pull_requests: "write",
       checks: "write",
       metadata: "read",
+      // Required to verify a commenter's repository permission before a
+      // destructive command such as @octopus cancel.
+      administration: "read",
     },
     // `repository` = created/renamed/transferred/deleted, so new repositories
     // on an "all repositories" install are discovered without a manual Sync.

@@ -92,7 +92,7 @@ export async function POST(
     pullRequest: { id: requested.id, number: requested.number, title: requested.title, url: requested.url, author: requested.author, status: requested.status, headSha: requested.headSha, reviewRequestVersion: requested.reviewRequestVersion, createdAt: requested.createdAt.toISOString() },
   }).catch(error => console.error("[review-retry] Status publication failed:", error));
 
-  await enqueue("process-review", { pullRequestId: pr.id });
+  await enqueue("process-review", { pullRequestId: requested.id, reviewRequestVersion: requested.reviewRequestVersion });
 
   return NextResponse.json({ message: "Review retry enqueued", pullRequestId: pr.id });
 }
