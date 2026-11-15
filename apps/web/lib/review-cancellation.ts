@@ -49,8 +49,6 @@ export async function cancelReviewRequest(params: {
   snapshot: ReviewRequestSnapshot;
   installationId?: number | null;
   fullName?: string | null;
-  /** Upper bound for recovering legacy checks that predate external_id. */
-  legacyNotAfter?: Date | null;
 }): Promise<CancelReviewOutcome> {
   const { pullRequestId, snapshot } = params;
   let current = snapshot;
@@ -84,7 +82,6 @@ export async function cancelReviewRequest(params: {
           pullRequestId,
           reviewRequestVersion: current.reviewRequestVersion,
           conclusion: "cancelled",
-          legacyNotAfter: params.legacyNotAfter ?? undefined,
         }).catch(error => console.warn("[review-cancellation] Failed to update the check run; the reaper will retry:", error instanceof Error ? error.message : "unknown error"));
       }
       return {
@@ -180,7 +177,7 @@ export async function handleReviewCancelCommand(params: {
 
   const row = await prisma.pullRequest.findUnique({
     where: { repositoryId_number: { repositoryId: params.repoId, number: params.prNumber } },
-    select: { id: true, headSha: true, reviewRequestVersion: true, status: true, updatedAt: true },
+    select: { id: true, headSha: true, reviewRequestVersion: true, status: true },
   });
   if (!row) {
     return {
@@ -194,7 +191,6 @@ export async function handleReviewCancelCommand(params: {
     snapshot: { headSha: row.headSha, reviewRequestVersion: row.reviewRequestVersion, status: row.status },
     installationId: params.installationId,
     fullName: `${params.owner}/${params.repoName}`,
-    legacyNotAfter: row.updatedAt,
   });
 
   switch (outcome.outcome) {

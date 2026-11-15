@@ -57,7 +57,6 @@ async function reconcileCheck(pr: ReapRow, conclusion: "cancelled" | "timed_out"
     await reconcileReviewCheck({
       installationId, fullName: repo.fullName, headSha: pr.headSha,
       pullRequestId: pr.id, reviewRequestVersion: pr.reviewRequestVersion, conclusion,
-      legacyNotAfter: pr.updatedAt,
     });
   } catch (error) {
     // The row stays failed/cancelled; the next sweep retries this PATCH. Never

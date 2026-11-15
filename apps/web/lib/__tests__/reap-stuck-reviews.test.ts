@@ -109,7 +109,6 @@ describe("reapStuckReviews", () => {
     expect(reconcile).toHaveBeenCalledWith({
       installationId: 123, fullName: "owner/repo", headSha: "a".repeat(40),
       pullRequestId: "pr_gh", reviewRequestVersion: 1, conclusion: "timed_out",
-      legacyNotAfter: minutesAgo(30),
     });
   });
 

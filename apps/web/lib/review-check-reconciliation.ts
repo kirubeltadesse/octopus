@@ -1,5 +1,6 @@
 import "server-only";
 import * as github from "@/lib/github";
+import type { GitHubCheckRun } from "@/lib/github";
 
 export const REVIEW_CHECK_NAME = "Octopus Review";
 
@@ -15,8 +16,8 @@ export async function reconcileReviewCheck(params: {
   pullRequestId: string;
   reviewRequestVersion: number;
   conclusion: "cancelled" | "timed_out";
-  /** Cutoff for recovering legacy checks created before external_id existed. */
-  legacyNotAfter?: Date;
+  /** Reliable evidence that a legacy run belongs to this request. */
+  legacy?: (run: GitHubCheckRun) => boolean;
 }): Promise<boolean> {
   if (!params.headSha) return false;
   const [owner, repo] = params.fullName.split("/");
@@ -24,7 +25,7 @@ export async function reconcileReviewCheck(params: {
   const check = await github.findCheckRunByExternalId(
     params.installationId, owner, repo, params.headSha, REVIEW_CHECK_NAME,
     `${params.pullRequestId}:${params.reviewRequestVersion}`,
-    params.legacyNotAfter,
+    params.legacy,
   );
   if (!check || check.status === "completed") return true;
   await github.updateCheckRun(params.installationId, owner, repo, check.id, params.conclusion, {

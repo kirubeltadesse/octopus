@@ -403,32 +403,39 @@ async function listCheckRuns(
 }
 
 /**
- * Select the check run for one review request. An exact external_id match wins.
- * When legacy runs created before external_id was available are allowed, only a
- * single unfinished candidate started no later than the request's cutoff is
- * selected; multiple candidates are ambiguous and nothing is guessed. Completed
- * runs are never selected for legacy recovery.
+ * Select the check run for one review request.
+ *
+ * An exact external_id match always wins. Legacy runs created before
+ * external_id existed are selected only when the caller supplies a reliable,
+ * request-specific correlation and exactly one legacy run matches. The shape of
+ * the commit (for example "the only unfinished check on this SHA") is never
+ * sufficient: an unrelated PR or older attempt can share the commit. Ambiguous
+ * or uncorrelated legacy runs are skipped and logged.
  */
 export function selectCheckRunForRequest(
   runs: GitHubCheckRun[],
   appId: string | number,
   externalId: string,
-  legacyNotAfter?: Date,
+  options: {
+    /** Reliable evidence that a legacy run belongs to this request. */
+    legacy?: (run: GitHubCheckRun) => boolean;
+    /** Diagnostic label, e.g. owner/repo@sha. */
+    context?: string;
+  } = {},
 ): GitHubCheckRun | null {
   const own = runs.filter(run => String(run.app?.id) === String(appId));
   const exact = own.filter(run => run.external_id === externalId);
   if (exact.length > 0) return exact.find(run => run.status !== "completed") ?? exact[0];
-  if (!legacyNotAfter) return null;
-  const cutoff = legacyNotAfter.getTime() + 2 * 60_000;
-  // Legacy recovery is only safe when the commit has exactly one legacy run.
-  // A second legacy run may belong to another PR or an older attempt, so it is
-  // ambiguous and nothing is selected.
-  const legacyRuns = own.filter(run => !run.external_id);
-  if (legacyRuns.length !== 1) return null;
-  const only = legacyRuns[0];
-  if (only.status === "completed" || !only.started_at) return null;
-  const started = Date.parse(only.started_at);
-  return Number.isFinite(started) && started <= cutoff ? only : null;
+
+  const legacyCandidates = own.filter(run => !run.external_id);
+  if (legacyCandidates.length === 0) return null;
+  const matches = options.legacy ? legacyCandidates.filter(options.legacy) : [];
+  if (matches.length === 1) return matches[0];
+  console.warn(
+    `[github] ${legacyCandidates.length} legacy check run(s)${options.context ? ` for ${options.context}` : ""} ` +
+    "lack reliable request correlation; skipping automatic reconciliation",
+  );
+  return null;
 }
 
 /**
@@ -443,12 +450,16 @@ export async function findCheckRunByExternalId(
   headSha: string,
   name: string,
   externalId: string,
-  legacyNotAfter?: Date,
+  /** Reliable evidence that a legacy run belongs to this request. */
+  legacy?: (run: GitHubCheckRun) => boolean,
 ): Promise<GitHubCheckRun | null> {
   const config = await getGithubAppConfig();
   if (!config) throw new Error("GitHub App is not configured for check reconciliation");
   const runs = await listCheckRuns(installationId, owner, repo, headSha, name);
-  return selectCheckRunForRequest(runs, config.appId, externalId, legacyNotAfter);
+  return selectCheckRunForRequest(runs, config.appId, externalId, {
+    legacy,
+    context: `${owner}/${repo}@${headSha.slice(0, 7)}`,
+  });
 }
 
 export async function createCheckRun(
