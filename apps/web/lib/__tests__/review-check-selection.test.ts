@@ -44,6 +44,14 @@ describe("selectCheckRunForRequest", () => {
     expect(selectCheckRunForRequest(runs, APP, "pr:1", REQUEST)).toBeNull();
   });
 
+  it("does not select a legacy check when an unrelated older legacy check is on the same commit", () => {
+    const runs = [
+      run({ id: 1, external_id: null, status: "completed", started_at: "2026-01-01T09:00:00Z" }),
+      run({ id: 2, external_id: null, status: "in_progress", started_at: "2026-01-01T10:04:00Z" }),
+    ];
+    expect(selectCheckRunForRequest(runs, APP, "pr:1", REQUEST)).toBeNull();
+  });
+
   it("never selects a completed legacy check", () => {
     const runs = [run({ id: 1, external_id: null, status: "completed" })];
     expect(selectCheckRunForRequest(runs, APP, "pr:1", REQUEST)).toBeNull();

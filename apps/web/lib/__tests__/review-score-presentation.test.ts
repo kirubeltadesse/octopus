@@ -96,7 +96,7 @@ describe("compact review score", () => {
       presentationBody: report("4/5"), findings: [], reviewHistoryUrl: HISTORY,
       checkConclusion: conclusion,
     });
-    expect(heading(out)).toBe("## 🐙 Octopus Review — 4/5 · Not assessed");
+    expect(heading(out)).toBe("## 🐙 Octopus Review — N/A · Not assessed");
     expect(heading(out)).not.toContain("Ready to merge");
   });
 
@@ -150,7 +150,7 @@ describe("every check conclusion", () => {
   it.each(["success", "failure", "neutral", "cancelled", "timed_out"] as const)("formats the %s conclusion", (conclusion) => {
     const expected = conclusion === "success"
       ? "4/5 · Ready to merge"
-      : conclusion === "failure" ? "4/5 · Changes required" : "4/5 · Not assessed";
+      : conclusion === "failure" ? "4/5 · Changes required" : "N/A · Not assessed";
     expect(formatCheckRunTitle({ coverage: coverage(), conclusion, score: 4 })).toBe(expected);
   });
 

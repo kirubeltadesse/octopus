@@ -3,7 +3,7 @@ import { prisma } from "@octopus/db";
 import { enqueue, loadQueueConfig, computeStaleReclaimMs } from "./queue";
 import { recordInterruptedAttempt } from "./review-attempt";
 import { reconcileReviewCheck } from "./review-check-reconciliation";
-import { REVIEW_CANCELLED_STATUS, isReviewCancelledStatus } from "./review-status-state";
+import { REVIEW_CANCELLED_STATUS } from "./review-status-state";
 import { safeErrorDetails } from "./provider-failure";
 
 // Reviews that die mid-flight (engine restart on deploy, crash, OOM, or a hang
@@ -131,22 +131,37 @@ export async function reapStuckReviews(
   }
 
   // Retry check PATCHes that failed transiently when the row was first reaped or
-  // cancelled. The reconciliation is idempotent and skips completed checks.
-  const unsettled = await prisma.pullRequest.findMany({
+  // cancelled. Only rows with the timeout-recovery marker are reconciled as
+  // timed_out: an ordinary failed review may have already set its own failure
+  // conclusion and must not be relabeled. The queries are idempotent and skip
+  // completed checks, so a later sweep retries a transient API failure.
+  const reconcileSelect = {
+    id: true, status: true, updatedAt: true, headSha: true, reviewRequestVersion: true,
+    repository: { select: { provider: true, fullName: true, installationId: true, organization: { select: { githubInstallationId: true } } } },
+  } as const;
+  const reconcileCutoff = new Date(now.getTime() - CHECK_RECONCILE_MAX_AGE_MS);
+  const timedOut = await prisma.pullRequest.findMany({
     where: {
-      status: { in: ["failed", REVIEW_CANCELLED_STATUS] },
-      updatedAt: { gte: new Date(now.getTime() - CHECK_RECONCILE_MAX_AGE_MS) },
+      status: "failed",
+      errorMessage: REAP_FAILED_MESSAGE,
+      updatedAt: { gte: reconcileCutoff },
       repository: { provider: "github" },
     },
-    select: {
-      id: true, status: true, updatedAt: true, headSha: true, reviewRequestVersion: true,
-      repository: { select: { provider: true, fullName: true, installationId: true, organization: { select: { githubInstallationId: true } } } },
-    },
+    select: reconcileSelect,
     take: CHECK_RECONCILE_BATCH,
   });
-  for (const pr of unsettled) {
-    await reconcileCheck(pr, isReviewCancelledStatus(pr.status) ? "cancelled" : "timed_out");
-  }
+  for (const pr of timedOut) await reconcileCheck(pr, "timed_out");
+
+  const cancelled = await prisma.pullRequest.findMany({
+    where: {
+      status: REVIEW_CANCELLED_STATUS,
+      updatedAt: { gte: reconcileCutoff },
+      repository: { provider: "github" },
+    },
+    select: reconcileSelect,
+    take: CHECK_RECONCILE_BATCH,
+  });
+  for (const pr of cancelled) await reconcileCheck(pr, "cancelled");
 
   return { requeued, failed };
 }

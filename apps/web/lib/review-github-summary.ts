@@ -103,7 +103,9 @@ export function formatCheckRunTitle(input: {
   score?: number | null;
 }): string {
   const assessed = reviewAssessmentComplete(input.coverage) && input.coverage.assessment?.state === "completed";
-  return formatCheckTitle(assessed ? input.score ?? null : null, reviewVerdict(input.coverage, input.conclusion));
+  // Only a completed success/failure review may present the Overall rating.
+  const scoreable = assessed && (input.conclusion === "success" || input.conclusion === "failure");
+  return formatCheckTitle(scoreable ? input.score ?? null : null, reviewVerdict(input.coverage, input.conclusion));
 }
 
 
@@ -438,10 +440,15 @@ export function formatGitHubReviewSummary(input: GitHubReviewSummaryInput): stri
   const findings = sortFindings(sanitizeFindings(input.findings));
   const conclusion: CheckConclusion = input.checkConclusion
     ?? (findings.some((f) => f.severity === "🔴") ? "failure" : "success");
+  // Only a completed success/failure review may present the Overall rating;
+  // neutral, cancelled, timed-out and invalid outcomes show N/A.
+  const score = conclusion === "success" || conclusion === "failure"
+    ? extractOverallScore(input.presentationBody)
+    : null;
   return fitDocument({
     findingVerdict: verdictFor(findings),
     mergeVerdict: reviewVerdict(coverage, conclusion),
-    score: extractOverallScore(input.presentationBody),
+    score,
     status: `${coverageSummary(coverage)}${input.reReview && input.resolvedCount ? ` (${input.resolvedCount} resolved)` : ""}`,
     headSha: input.headSha,
     summary: extractPrSummary(input.presentationBody, input.prTitle),

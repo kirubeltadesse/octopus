@@ -420,12 +420,15 @@ export function selectCheckRunForRequest(
   if (exact.length > 0) return exact.find(run => run.status !== "completed") ?? exact[0];
   if (!legacyNotAfter) return null;
   const cutoff = legacyNotAfter.getTime() + 2 * 60_000;
-  const legacy = own.filter(run => {
-    if (run.external_id || run.status === "completed" || !run.started_at) return false;
-    const started = Date.parse(run.started_at);
-    return Number.isFinite(started) && started <= cutoff;
-  });
-  return legacy.length === 1 ? legacy[0] : null;
+  // Legacy recovery is only safe when the commit has exactly one legacy run.
+  // A second legacy run may belong to another PR or an older attempt, so it is
+  // ambiguous and nothing is selected.
+  const legacyRuns = own.filter(run => !run.external_id);
+  if (legacyRuns.length !== 1) return null;
+  const only = legacyRuns[0];
+  if (only.status === "completed" || !only.started_at) return null;
+  const started = Date.parse(only.started_at);
+  return Number.isFinite(started) && started <= cutoff ? only : null;
 }
 
 /**

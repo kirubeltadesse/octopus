@@ -7,11 +7,20 @@ type Orphan = {
   reviewAttemptId?: string | null; headSha?: string | null;
   repository?: { provider: string; fullName?: string; installationId?: number; organization?: { githubInstallationId?: number } };
 };
+type Where = { status?: string | { in?: string[] }; errorMessage?: string; OR?: unknown };
+
 let orphans: Orphan[] = [];
-let unsettled: Orphan[] = [];
+let timeoutRows: Orphan[] = [];
+let cancelledRows: Orphan[] = [];
+let reapMessage = "";
 let updateCount = 1;
-const findMany = mock(async ({ where }: { where?: { status?: { in?: string[] } } } = {}) =>
-  where?.status?.in ? unsettled : orphans);
+const findManyCalls: Where[] = [];
+const findMany = mock(async ({ where }: { where?: Where } = {}) => {
+  findManyCalls.push(where ?? {});
+  if (where?.status === "failed") return where.errorMessage === reapMessage ? timeoutRows : [];
+  if (where?.status === "cancelled") return cancelledRows;
+  return orphans;
+});
 const updateMany = mock(async () => ({ count: updateCount }));
 mock.module("@octopus/db", () => ({
   prisma: { pullRequest: { findMany, updateMany }, $transaction: (run: (tx: unknown) => unknown) => run({ pullRequest: { updateMany } }) },
@@ -38,6 +47,7 @@ mock.module("@/lib/review-check-reconciliation", () => ({ reconcileReviewCheck: 
 const { reapStuckReviews, REAP_FAILED_MESSAGE } = await import(
   "@/lib/reap-stuck-reviews"
 );
+reapMessage = REAP_FAILED_MESSAGE;
 
 const NOW = new Date("2026-08-06T13:00:00.000Z");
 const minutesAgo = (m: number) => new Date(NOW.getTime() - m * 60 * 1000);
@@ -51,9 +61,11 @@ const githubOrphan = (id: string, status = "reviewing"): Orphan => ({
 describe("reapStuckReviews", () => {
   beforeEach(() => {
     orphans = [];
-    unsettled = [];
+    timeoutRows = [];
+    cancelledRows = [];
     updateCount = 1;
     failReconcile = false;
+    findManyCalls.length = 0;
     findMany.mockClear();
     updateMany.mockClear();
     enqueue.mockClear();
@@ -91,7 +103,7 @@ describe("reapStuckReviews", () => {
     expect(enqueue).not.toHaveBeenCalled();
   });
 
-  it("marks an orphaned GitHub check as timed_out", async () => {
+  it("marks an expired orphaned GitHub check as timed_out", async () => {
     orphans = [githubOrphan("pr_gh", "reviewing")];
     await reapStuckReviews(NOW);
     expect(reconcile).toHaveBeenCalledWith({
@@ -111,7 +123,7 @@ describe("reapStuckReviews", () => {
     expect(reconcile).not.toHaveBeenCalled();
   });
 
-  it("retries a check PATCH that failed transiently on a later sweep", async () => {
+  it("retries a timed-out check PATCH that failed transiently on a later sweep", async () => {
     orphans = [githubOrphan("pr_retry", "reviewing")];
     failReconcile = true;
     const warn = console.warn;
@@ -125,16 +137,28 @@ describe("reapStuckReviews", () => {
 
     failReconcile = false;
     orphans = [];
-    unsettled = [githubOrphan("pr_retry", "failed")];
+    timeoutRows = [githubOrphan("pr_retry", "failed")];
     await reapStuckReviews(new Date(NOW.getTime() + 5 * 60 * 1000));
     expect(reconcile).toHaveBeenCalledTimes(2);
     expect(reconcile).toHaveBeenLastCalledWith(expect.objectContaining({ pullRequestId: "pr_retry", conclusion: "timed_out" }));
   });
 
-  it("reconciles a cancelled check as cancelled and never re-queues it", async () => {
-    unsettled = [githubOrphan("pr_cancel", "cancelled")];
+  it("reconciles an explicitly cancelled check as cancelled, never timed_out", async () => {
+    cancelledRows = [githubOrphan("pr_cancel", "cancelled")];
     await reapStuckReviews(NOW);
     expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ pullRequestId: "pr_cancel", conclusion: "cancelled" }));
+    expect(reconcile).not.toHaveBeenCalledWith(expect.objectContaining({ conclusion: "timed_out" }));
     expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("never classifies an ordinary failed review as timed_out", async () => {
+    timeoutRows = [];
+    cancelledRows = [];
+    await reapStuckReviews(NOW);
+    expect(reconcile).not.toHaveBeenCalled();
+    // The retry sweep must be scoped to the timeout-recovery marker, not every failure.
+    const failedQuery = findManyCalls.find(where => where.status === "failed");
+    expect(failedQuery?.errorMessage).toBe(REAP_FAILED_MESSAGE);
+    expect(findManyCalls.some(where => typeof where.status === "object" && Array.isArray(where.status.in))).toBe(false);
   });
 });
