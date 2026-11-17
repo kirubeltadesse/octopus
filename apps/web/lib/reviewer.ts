@@ -64,6 +64,7 @@ import { confirmCompleteReviewCurrent, confirmGenerationRetryCurrent } from "@/l
 import { prepareReviewInput, applyReviewCoverage, coverageSummary, reviewCheckResult, reviewAssessmentComplete, generationFailureCode, type ReviewInput, type ReviewCoverage } from "@/lib/review-coverage";
 import { prepareReviewComment } from "@/lib/review-comment-context";
 import { createCoveredReviewRequest } from "@/lib/review-request";
+import { buildReReviewContext, type ReReviewDismissedFinding } from "@/lib/review-rereview-context";
 import { canRestrictReviewToFollowUp } from "@/lib/review-follow-up";
 import { prepareRecoveredReviewPresentation, prepareReviewPresentation, mapReviewPresentation, enforceReviewFindingsIntegrity, finalizeReviewPresentation, stripReviewReasoningArtifacts } from "@/lib/review-presentation";
 import { extractOverallScore, formatCheckRunTitle, formatGitHubReviewSummary, formatInvalidAssessmentSummary } from "@/lib/review-github-summary";
@@ -1698,121 +1699,24 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
     // Provider comments survive failed/partial attempts. Restrict follow-up
     // findings only when the preceding request completed the eligible scope.
     let priorReviewContext = "";
-    let dismissedDbFindings: { title: string; description: string | null; severity: string; filePath: string | null; lineNumber: number | null }[] = [];
+    let dismissedDbFindings: ReReviewDismissedFinding[] = [];
     const botComments = allPriorReviewComments.filter((c) => !c.inReplyToId && c.user === botLogin && c.line != null);
     const isReReview = await canRestrictReviewToFollowUp(pr.id, coverage);
 
     if (isReReview) {
-      const parts: string[] = [
-        "⚠️ RE-REVIEW MODE — STRICT DEDUPLICATION REQUIRED ⚠️",
-        "",
-        "This PR has already been reviewed. Your ONLY job is to verify whether previously raised findings have been addressed. Follow these rules with ZERO exceptions:",
-        "",
-        "RULE 1 — NO NEW FINDINGS: Do NOT raise any new findings UNLESS they are 🔴 CRITICAL severity AND were clearly introduced by code changes made AFTER the last review. If the code existed in the prior review, you already had your chance to flag it.",
-        "",
-        "RULE 2 — NO REPEATS: Do NOT rephrase, reframe, re-angle, or re-raise ANY previously raised finding. This applies even if you use completely different wording. Examples of PROHIBITED repeats:",
-        '  - Prior: "Inefficient blob buffering" → New: "Memory inefficient blob buffering" (SAME finding, different adjective)',
-        '  - Prior: "Console.error in production" → New: "Console.log in production" (SAME concept)',
-        '  - Prior: "Missing auth check" → New: "No authentication verification" (SAME issue rephrased)',
-        "  A finding is a repeat if it targets the same file, nearby lines (±10), and the same conceptual issue.",
-        "",
-        "RULE 3 — AUTHOR RESPONSES MEAN DISMISSED: When the author has replied to a finding with an explanation, that finding is DISMISSED. Do not re-raise it, even if you disagree with the author's reasoning. The author knows their codebase better than you.",
-        "",
-        "RULE 4 — EMPTY IS GOOD: If all previous findings are addressed and no critical new issues exist, the findings list MUST be empty. An empty findings list on re-review is the EXPECTED outcome.",
-        "",
-        "RULE 5 — SELF-CHECK: Before including ANY finding in your output, ask yourself: 'Does this finding overlap with ANY item in PRIOR INLINE COMMENTS or DISMISSED FINDINGS below?' If yes, EXCLUDE it.",
-        "",
-        "RULE 6 — SCORE MUST REFLECT CURRENT STATE: Score each category based on the PR as it stands NOW (all commits combined). Items marked ✅ RESOLVED below have been fixed by the author (the code at that location has changed since your last review). If a prior finding is resolved — especially if the author applied YOUR OWN suggestion — that category's score MUST improve. A fixed security issue means Security should be 4/5 or 5/5, NOT the old score. Do NOT penalize for resolved issues.",
-      ];
-
-      // Build a map of bot comment ID → author reply bodies for inline dismissals
-      const repliesByBotComment = new Map<number, string[]>();
-      for (const c of allPriorReviewComments) {
-        if (c.inReplyToId && c.user !== botLogin) {
-          const replies = repliesByBotComment.get(c.inReplyToId) ?? [];
-          replies.push(c.body);
-          repliesByBotComment.set(c.inReplyToId, replies);
-        }
-      }
-
-      if (botComments.length > 0) {
-        const summaries = botComments.map((c) => {
-          // Include first two lines for better context (title + description start)
-          const bodyLines = c.body.split("\n").filter((l) => l.trim());
-          const summary = bodyLines.slice(0, 2).map((l) => l.replace(/\*\*/g, "").trim()).join(" — ");
-          const resolvedTag = c.isOutdated ? " ✅ RESOLVED (code changed)" : "";
-          let entry = `- ${c.path}:${c.line} — ${summary}${resolvedTag}`;
-
-          // Include author replies (especially dismissals) so the LLM understands why it was rejected
-          const replies = repliesByBotComment.get(c.id);
-          if (replies && replies.length > 0) {
-            const replyTexts = replies.map((r) => r.trim().slice(0, 200)).join("; ");
-            entry += `\n  Author response: ${replyTexts}`;
-          }
-
-          return entry;
-        });
-        parts.push(
-          "",
-          "═══ PRIOR INLINE COMMENTS (BLOCKED — every item below is BANNED from your output, even with different wording) ═══",
-          ...summaries,
-        );
-      }
-
-      // Include findings from prior review summary tables (catches findings that
-      // were never posted as inline comments — e.g. when inline threshold is high)
-      if (priorSummaryTableFindings.length > 0) {
-        // Deduplicate against inline comments already listed above
-        const inlineKeys = new Set(botComments.map((c) => `${c.path}:${c.line}`));
-        const uniqueTableFindings = priorSummaryTableFindings.filter(
-          (f) => !inlineKeys.has(`${f.filePath}:${f.line}`),
-        );
-        if (uniqueTableFindings.length > 0) {
-          parts.push(
-            "",
-            "═══ PRIOR SUMMARY TABLE FINDINGS (BLOCKED — these were raised in previous reviews, do NOT repeat) ═══",
-            ...uniqueTableFindings.map((f) => `- ${f.filePath}:${f.line} — "${f.title}"`),
-          );
-        }
-      }
-
-      // Fetch this PR's dismissed findings from the database for explicit dedup
+      let dismissedFindings: ReReviewDismissedFinding[] = [];
       try {
-        const dismissedFindings = await prisma.reviewIssue.findMany({
-          where: {
-            pullRequestId: pr.id,
-            feedback: "down",
-          },
-          select: {
-            title: true,
-            description: true,
-            severity: true,
-            filePath: true,
-            lineNumber: true,
-            feedbackBy: true,
-          },
+        dismissedFindings = await prisma.reviewIssue.findMany({
+          where: { pullRequestId: pr.id, feedback: "down" },
+          select: { title: true, description: true, severity: true, filePath: true, lineNumber: true, feedbackBy: true },
           orderBy: { feedbackAt: "desc" },
           take: 30,
         });
-
-        // Store for hard dedup filter later
         dismissedDbFindings = dismissedFindings;
-
-        if (dismissedFindings.length > 0) {
-          parts.push(
-            "",
-            "═══ DISMISSED FINDINGS (BANNED — the author explicitly rejected these, do NOT repeat or rephrase) ═══",
-            ...dismissedFindings.map((f) => {
-              const desc = f.description ? ` — ${f.description.slice(0, 150)}` : "";
-              return `- [${f.severity}] ${f.filePath ?? "unknown"}: "${f.title}"${desc}`;
-            }),
-          );
-        }
       } catch (err) {
         console.warn("[reviewer] Failed to fetch dismissed findings for re-review context:", safeErrorDetails(err));
       }
-
-      priorReviewContext = parts.join("\n");
+      priorReviewContext = buildReReviewContext({ botLogin, botComments, allPriorReviewComments, priorSummaryTableFindings, dismissedFindings });
       console.log(`[reviewer] Re-review detected: ${botComments.length} prior inline comments, injecting re-review instructions`);
     }
 
