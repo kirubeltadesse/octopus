@@ -1,6 +1,4 @@
 import type { Metadata } from "next";
-import { headers } from "next/headers";
-import { auth } from "@/lib/auth";
 import { LandingFooter } from "@/components/landing-footer";
 import { LandingMobileNav } from "@/components/landing-mobile-nav";
 import { LandingDesktopNav } from "@/components/landing-desktop-nav";
@@ -17,7 +15,7 @@ import {
 } from "@tabler/icons-react";
 
 export const metadata: Metadata = {
-  title: "Octopus in your editor — code review for AI coding agents",
+  title: { absolute: "Octopus in your editor — code review for AI coding agents" },
   description:
     "Building with AI? Octopus reviews the code your AI writes for real bugs and security issues, from your coding agent, and explains what it finds in plain English.",
   alternates: {
@@ -123,7 +121,6 @@ const faqs = [
 /* ------------------------------------------------------------------ */
 
 export default async function EditorPage() {
-  const session = await auth.api.getSession({ headers: await headers() });
   return (
     <div className="dark relative min-h-screen bg-background text-[#a0a0a0] selection:bg-white/20">
       {/* Grain overlay */}
@@ -136,8 +133,8 @@ export default async function EditorPage() {
       />
 
       {/* Navigation */}
-      <LandingMobileNav isLoggedIn={!!session} />
-      <LandingDesktopNav isLoggedIn={!!session} />
+      <LandingMobileNav />
+      <LandingDesktopNav />
 
       {/* Hero */}
       <section className="relative z-10 px-6 pb-16 pt-28 md:px-8 md:pb-24 md:pt-40">

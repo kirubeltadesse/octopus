@@ -1,5 +1,6 @@
 import type { MetadataRoute } from "next";
 import { prisma } from "@/lib/db";
+import { postModifiedAt } from "@/lib/blog-reading";
 
 export const dynamic = "force-dynamic";
 
@@ -23,11 +24,15 @@ const STATIC_PAGES: MetadataRoute.Sitemap = [
   { url: `${SITE_URL}/compare`, changeFrequency: "weekly", priority: 0.8 },
   { url: `${SITE_URL}/vs-coderabbit`, changeFrequency: "weekly", priority: 0.8 },
   { url: `${SITE_URL}/vs-greptile`, changeFrequency: "weekly", priority: 0.8 },
+  { url: `${SITE_URL}/coderabbit-alternatives`, changeFrequency: "weekly", priority: 0.8 },
+  { url: `${SITE_URL}/self-hosted-ai-code-review`, changeFrequency: "monthly", priority: 0.8 },
+  { url: `${SITE_URL}/editor`, changeFrequency: "monthly", priority: 0.8 },
   { url: `${SITE_URL}/brand`, changeFrequency: "monthly", priority: 0.5 },
   { url: `${SITE_URL}/bug-bounty`, changeFrequency: "monthly", priority: 0.6 },
   { url: `${SITE_URL}/docs/about`, changeFrequency: "monthly", priority: 0.8 },
   { url: `${SITE_URL}/docs/getting-started`, changeFrequency: "monthly", priority: 0.8 },
   { url: `${SITE_URL}/docs/pricing`, changeFrequency: "weekly", priority: 0.9 },
+  { url: `${SITE_URL}/docs/choosing-a-model`, changeFrequency: "monthly", priority: 0.8 },
   { url: `${SITE_URL}/docs/faq`, changeFrequency: "monthly", priority: 0.7 },
   { url: `${SITE_URL}/docs/github-action`, changeFrequency: "monthly", priority: 0.9 },
   { url: `${SITE_URL}/docs/integrations`, changeFrequency: "monthly", priority: 0.8 },
@@ -44,6 +49,7 @@ const STATIC_PAGES: MetadataRoute.Sitemap = [
   { url: `${SITE_URL}/docs/github-app`, changeFrequency: "monthly", priority: 0.7 },
   { url: `${SITE_URL}/docs/oauth-setup`, changeFrequency: "monthly", priority: 0.7 },
   { url: `${SITE_URL}/docs/security`, changeFrequency: "monthly", priority: 0.7 },
+  { url: `${SITE_URL}/docs/security/hall-of-fame`, changeFrequency: "monthly", priority: 0.4 },
   { url: `${SITE_URL}/docs/security-overview`, changeFrequency: "monthly", priority: 0.7 },
   { url: `${SITE_URL}/docs/data-retention`, changeFrequency: "yearly", priority: 0.3 },
   { url: `${SITE_URL}/docs/dpa`, changeFrequency: "yearly", priority: 0.3 },
@@ -59,12 +65,12 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   try {
     const blogPosts = await prisma.blogPost.findMany({
       where: { status: "published", deletedAt: null },
-      select: { slug: true, publishedAt: true, updatedAt: true },
+      select: { slug: true, publishedAt: true, contentUpdatedAt: true },
       orderBy: { publishedAt: "desc" },
     });
 
     blogPages = blogPosts.map((post) => {
-      const modified = post.updatedAt ?? post.publishedAt;
+      const modified = postModifiedAt(post);
       return {
         url: `${SITE_URL}/blog/${post.slug}`,
         // Real, verifiable modification date, date-only (no sub-second precision).

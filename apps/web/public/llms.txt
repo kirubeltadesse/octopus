@@ -8,7 +8,7 @@ Octopus is a source-available (Modified MIT) AI code review platform. It connect
 
 - Automated pull request review with codebase context (vector index over the whole repository, not just the diff)
 - Severity-rated findings and a per-PR quality score; re-review on new commits
-- Choice of AI vendor and model per organization or per repository: Anthropic Claude (Fable 5.2, Fable 5.1, Opus 5, Sonnet 5), OpenAI (GPT-6 Astra, GPT-5.3 Codex), Google Gemini, xAI Grok (Grok 4.6), Alibaba Cloud Qwen (Qwen3.8-Max), and any model on OpenRouter (e.g. Kimi K3). Cloud default: Claude Opus 5.
+- Choice of AI vendor and model per organization or per repository: Anthropic Claude (Fable 5.2, Fable 5.1, Opus 5.5, Opus 5, Sonnet 5), OpenAI (GPT-6 Astra, GPT-5.3 Codex), Google Gemini, xAI Grok (Grok 4.6), Alibaba Cloud Qwen (Qwen3.8-Max), and any model on OpenRouter (e.g. Kimi K3). Cloud default: Claude Opus 5.5.
 - Bring your own API keys (Anthropic, OpenAI, Google, xAI, Alibaba Cloud Model Studio, OpenRouter) or pay with Octopus credits
 - Organization knowledge base: custom rules and guidelines the reviewer follows
 - Package analyzer, code chat, issue creation from findings, live review timeline
@@ -36,6 +36,7 @@ Usage-based. Free credits on signup, no subscription. Octopus Cloud bills AI usa
 - About: https://octopus-review.ai/docs/about
 - Getting started: https://octopus-review.ai/docs/getting-started
 - Pricing: https://octopus-review.ai/docs/pricing
+- Choosing a model: https://octopus-review.ai/docs/choosing-a-model
 - FAQ: https://octopus-review.ai/docs/faq
 - Integrations: https://octopus-review.ai/docs/integrations
 - CLI: https://octopus-review.ai/docs/cli
@@ -54,6 +55,8 @@ Usage-based. Free credits on signup, no subscription. Octopus Cloud bills AI usa
 - Blog (model launches, product news): https://octopus-review.ai/blog
 - Compared with other AI reviewers: https://octopus-review.ai/compare
 - Compared with CodeRabbit: https://octopus-review.ai/vs-coderabbit
+- CodeRabbit alternatives: https://octopus-review.ai/coderabbit-alternatives
+- Self-hosted AI code review: https://octopus-review.ai/self-hosted-ai-code-review
 - Full documentation text for LLMs: https://octopus-review.ai/llms-full.txt
 - Source: https://github.com/octopusreview/octopus
 - Contact: support@octopus-review.ai

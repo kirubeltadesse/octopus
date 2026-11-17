@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.23] - 2026-11-15
+
+### Added
+
+- Octopus Cloud can now report its completed sales for a period to our own advertising tool. Nothing changes for customers.
+
+## [1.4.22] - 2026-11-15
+
+### Changed
+
+- Docs, comparison pages and blog posts are now served from a short-lived cache, so the server no longer rebuilds them for every visit. If you are signed in, the Dashboard button on these pages appears a moment after the page loads.
+
+## [1.4.21] - 2026-11-15
+
+### Added
+
+- A page on self-hosted AI code review: what stays on your own servers, what you need to run it, what it costs, and when Octopus Cloud is the better choice.
+- A comparison of eight AI code review tools, with prices and features read from each vendor's own site.
+- The pricing page now shows what a review typically costs, by model and by review size.
+
+### Fixed
+
+- The CodeRabbit comparison page said CodeRabbit could not be self-hosted. It can, on its Enterprise plans.
+## [1.4.20] - 2026-11-14
+
+### Added
+
+- A new docs page, "Which model should review your code", shows what each review model has cost per review on Octopus Cloud over the last 30 days, when to pick which, and where to switch.
+
+## [1.4.19] - 2026-11-14
+
+### Added
+
+- Each blog post now ends with links to up to three related posts.
+- Blog posts and comparison pages now show their own preview card when a link is shared, instead of one image for every page. A post with a cover image keeps it.
+
+### Changed
+
+- The homepage now opens by saying what Octopus is: AI code review for every pull request. The setup prompt is still on the first screen, with a button to copy it.
+
+### Fixed
+
+- A blog post's "last modified" date in the sitemap and in search data now changes only when the post's text is edited.
+- llms.txt named Claude Opus 5 as the Octopus Cloud default model. The default is Claude Opus 5.5.
+
+### Security
+
+- The Octopus Cloud site now tells browsers to keep using HTTPS for a year (HSTS). Self-hosted installs are not changed.
+
+## [1.4.18] - 2026-11-14
+
+### Fixed
+
+- On a phone, the buttons in the top navigation, the docs header and the two links under the homepage headline are easier to tap. They look the same as before.
+
+## [1.4.17] - 2026-11-14
+
+### Fixed
+
+- A mistyped or outdated address on the Octopus site now shows a "page not found" page instead of sending you to the sign-in screen. Pages that need you to be signed in still take you to sign-in and bring you back afterwards.
+- The addresses /pricing and /about now take you to the pricing and about pages in the docs.
+- Page titles in the browser tab and in search results no longer show "Octopus" twice.
+
+## [1.4.16] - 2026-11-13
+
+### Security
+
+- Octopus now checks the Elasticsearch server's certificate before sending indexing logs over HTTPS. If you self-host Elasticsearch with a private or self-signed certificate, set NODE_EXTRA_CA_CERTS to its CA file, or indexing logs will stop being written.
+
+## [1.4.15] - 2026-11-13
+
+### Fixed
+
+- Connecting GitHub no longer fails with "Install verification unavailable" after a brief internal connection drop. Octopus now retries before giving up.
+
 ## [1.4.14] - 2026-11-13
 
 ### Added

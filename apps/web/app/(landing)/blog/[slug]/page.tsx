@@ -1,9 +1,7 @@
 import type { Metadata } from "next";
-import { ORGANIZATION_ENTITY } from "@/lib/structured-data";
+import { ORGANIZATION_ENTITY, blogAuthorJsonLd } from "@/lib/structured-data";
 import { notFound } from "next/navigation";
 import Link from "@/components/link";
-import { headers } from "next/headers";
-import { auth } from "@/lib/auth";
 import { prisma } from "@octopus/db";
 import { LandingFooter } from "@/components/landing-footer";
 import { LandingMobileNav } from "@/components/landing-mobile-nav";
@@ -13,10 +11,27 @@ import { BlogAudioPlayer } from "@/components/blog-audio-player";
 import { BlogToc } from "@/components/blog-toc";
 import { ScrollToTop } from "@/components/scroll-to-top";
 import { IconArrowLeft } from "@tabler/icons-react";
-import { readingTimeMinutes, extractHeadings, proseWordCount } from "@/lib/blog-reading";
+import { readingTimeMinutes, extractHeadings, proseWordCount, postModifiedAt } from "@/lib/blog-reading";
 import { safeJsonLd } from "@/lib/html";
+import { relatedPosts } from "@/lib/blog-related";
 
-const DEFAULT_OG_IMAGE = "https://octopus-review.ai/og-image.png";
+import { CARD_SIZE } from "@/lib/og-card";
+
+// Every published post's tags, newest first, to pick related posts from.
+// Read on each request, so a post that is unpublished stops being listed at once.
+function getRelatedCandidates() {
+  return prisma.blogPost.findMany({
+    where: { status: "published", deletedAt: null },
+    select: { slug: true, title: true, tags: true },
+    orderBy: { publishedAt: "desc" },
+  });
+}
+
+// No post is rendered at build time (the build has no database). Each post is
+// rendered on its first request and then served from the cache.
+export function generateStaticParams() {
+  return [];
+}
 
 async function getPost(slug: string) {
   return prisma.blogPost.findFirst({
@@ -26,6 +41,13 @@ async function getPost(slug: string) {
 
 function canonicalUrlFor(slug: string) {
   return `https://octopus-review.ai/blog/${slug}`;
+}
+
+/** The post's cover image, or a card generated from its title when it has none. */
+function socialImage(post: { slug: string; title: string; coverImageUrl: string | null }) {
+  return post.coverImageUrl
+    ? { url: post.coverImageUrl }
+    : { url: `${canonicalUrlFor(post.slug)}/card`, ...CARD_SIZE, alt: post.title };
 }
 
 export async function generateMetadata({
@@ -40,7 +62,7 @@ export async function generateMetadata({
   const canonicalUrl = canonicalUrlFor(slug);
 
   return {
-    title: `${post.title} — Octopus Blog`,
+    title: post.title,
     description: post.excerpt ?? undefined,
     keywords: post.tags.length > 0 ? post.tags : undefined,
     alternates: {
@@ -51,13 +73,13 @@ export async function generateMetadata({
       description: post.excerpt ?? undefined,
       type: "article",
       publishedTime: post.publishedAt?.toISOString(),
-      images: [{ url: post.coverImageUrl ?? DEFAULT_OG_IMAGE }],
+      images: [socialImage(post)],
     },
     twitter: {
       card: "summary_large_image",
       title: post.title,
       description: post.excerpt ?? undefined,
-      images: [post.coverImageUrl ?? DEFAULT_OG_IMAGE],
+      images: [socialImage(post).url],
     },
   };
 }
@@ -68,8 +90,6 @@ export default async function BlogPostPage({
   params: Promise<{ slug: string }>;
 }) {
   const { slug } = await params;
-  const session = await auth.api.getSession({ headers: await headers() }).catch(() => null);
-  const isLoggedIn = !!session;
   const post = await getPost(slug);
 
   if (!post) notFound();
@@ -78,22 +98,20 @@ export default async function BlogPostPage({
   const headings = extractHeadings(post.content);
   const minutes = post.readingTime ?? readingTimeMinutes(post.content);
   const wordCount = proseWordCount(post.content);
+  const related = relatedPosts(slug, await getRelatedCandidates());
 
   const blogPostingJsonLd = {
     "@context": "https://schema.org",
     "@type": "BlogPosting",
     headline: post.title,
     description: post.excerpt ?? undefined,
-    image: [post.coverImageUrl ?? DEFAULT_OG_IMAGE],
+    image: [socialImage(post).url],
     datePublished: post.publishedAt?.toISOString(),
-    dateModified: (post.updatedAt ?? post.publishedAt)?.toISOString(),
+    dateModified: postModifiedAt(post)?.toISOString(),
     wordCount,
     ...(post.tags.length > 0 ? { keywords: post.tags.join(", ") } : {}),
     ...(post.category ? { articleSection: post.category } : {}),
-    author: {
-      "@type": "Person",
-      name: post.authorName,
-    },
+    author: blogAuthorJsonLd(post.authorName),
     publisher: ORGANIZATION_ENTITY,
     mainEntityOfPage: {
       "@type": "WebPage",
@@ -130,13 +148,13 @@ export default async function BlogPostPage({
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: safeJsonLd(breadcrumbJsonLd) }}
       />
-      <LandingDesktopNav isLoggedIn={isLoggedIn} />
-      <LandingMobileNav isLoggedIn={isLoggedIn} />
+      <LandingDesktopNav />
+      <LandingMobileNav />
 
       <div className="mx-auto max-w-6xl px-6 pt-32 pb-20">
         <Link
           href="/blog"
-          className="mb-8 inline-flex items-center gap-1.5 text-sm text-[#555] transition-colors hover:text-white"
+          className="relative mb-8 inline-flex items-center gap-1.5 text-sm text-[#555] transition-colors after:absolute after:-inset-x-2 after:-inset-y-3 after:content-[''] hover:text-white"
         >
           <IconArrowLeft className="size-3.5" />
           Back to Blog
@@ -217,6 +235,26 @@ export default async function BlogPostPage({
                   </Link>
                 ))}
               </div>
+            )}
+
+            {related.length > 0 && (
+              <nav aria-label="Related posts" className="mt-10 border-t border-white/[0.06] pt-6">
+                <h2 className="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-[#888]">
+                  Related posts
+                </h2>
+                <ul>
+                  {related.map((relatedPost) => (
+                    <li key={relatedPost.slug}>
+                      <Link
+                        href={`/blog/${relatedPost.slug}`}
+                        className="block py-2 text-sm text-[#ccc] transition-colors hover:text-primary"
+                      >
+                        {relatedPost.title}
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </nav>
             )}
           </article>
 

@@ -264,11 +264,69 @@ Usage-Based: Pay only for what you use. Purchase credits as needed or set up aut
         text: `Octopus supports models including Claude Fable 5.2, Claude Sonnet 5.5, Claude Opus 5.5 and GPT-6 Astra. For model pricing, the platform rate and prompt-cache discounts, see the pricing guide: https://octopus-review.ai/docs/pricing.`,
       },
       {
+        heading: "What a review costs",
+        text: `These figures come from real reviews on Octopus Cloud in the 30 days up to 14 November 2026. They are the amounts charged on platform keys, so they already include the 2x platform rate on the provider's list price.
+We split the reviews into thirds by how much the reviewer had to read: the change plus the repository context it pulled in. Each figure is the median charge in that third.
+Model | Smaller third | Middle third | Larger third
+Claude Opus 5.5 (the Cloud default) | $0.52 | $0.76 | $1.13
+Claude Fable 5.2 | $1.03 | $1.49 | $2.40
+Claude Haiku 4.5 | $0.06 | $0.09 | $0.12
+GPT-5.3 Codex | $0.14 | $0.16 | $0.20
+Supporting steps that run with a review, such as re-ranking context and validating findings, add about $0.07 per review on average.
+These are typical amounts. They are not fixed prices. A median is the middle value, so about half the reviews in each third cost more than the figure shown. An unusually large pull request costs more. Prices follow the providers' list prices, so these amounts change when a provider changes its rates.
+Every AI operation is logged, and you can see your own usage breakdown in the billing settings.
+With your own provider API key, Octopus does not bill the model call at all. Your provider bills you directly. Operations that still run on platform providers, such as embeddings, continue to use credits.`,
+      },
+      {
         heading: "Spend Limits & Billing",
         text: `Set monthly spend limits per organization to prevent unexpected costs.
 Track usage in the billing dashboard: see token consumption, credit balance, and cost breakdown by operation (review, chat, indexing, analysis).
 Credits can be purchased, and auto-reload ensures you never run out mid-review.
 Self-hosting: No credits needed. Use your own API keys directly.`,
+      },
+    ],
+  },
+  {
+    page: "choosing-a-model",
+    title: "Which model should review your code",
+    sections: [
+      {
+        heading: "What changes when you change the model",
+        text: `Octopus lets you choose the model that reviews your pull requests, for a whole organisation or for a single repository. This guide covers what the choice changes and what each model has cost per review. It ends with how to switch.
+Cost per review. Octopus Cloud bills AI usage at 2x the provider's list price. Among the models below, list prices run from $1 to $10 per 1M input tokens.
+How long a review takes. Most reviews finish in 30 to 90 seconds, and a pull request with hundreds of files can take a few minutes. Higher reasoning effort means a slower review.
+How much reasoning goes into it. Some models think before they answer. The Reasoning Effort setting controls how hard those models reason. Models without extended thinking ignore it.`,
+      },
+      {
+        heading: "What each model cost per review",
+        text: `These are the median amounts charged per review on Octopus Cloud over the 30 days up to 14 November 2026. They cover reviews on platform keys and include the 2x platform rate. The last column is the range that holds the middle half of reviews.
+Model | Median per review | Middle half of reviews
+Claude Haiku 4.5: $0.09 ($0.07 to $0.11).
+GPT-5.3 Codex: $0.16 ($0.15 to $0.19).
+Qwen3.8-Max: $0.17 ($0.14 to $0.22).
+Claude Sonnet 5.5: $0.42 ($0.23 to $0.64).
+Claude Opus 5.5 (Cloud default): $0.76 ($0.57 to $0.98).
+Claude Opus 5: $1.03 ($0.73 to $1.41).
+Claude Fable 5.2: $1.52 ($1.19 to $2.13).
+GPT-6 Astra: $1.67 ($1.54 to $2.33).
+Claude Fable 5.1: $2.38 ($1.98 to $3.10).
+This is cost data, not quality data: we have not measured which model finds more problems, so nothing here ranks the models on review quality. Each model reviewed the pull requests its own users sent it, so the rows are not a test on identical pull requests. Your figures will depend on the size of your changes.`,
+      },
+      {
+        heading: "Which model to pick",
+        text: `If you have no reason to change, keep the Cloud default, Claude Opus 5.5.
+If a repository opens many pull requests and cost matters most, give it a cheaper model. Claude Haiku 4.5, GPT-5.3 Codex and Qwen3.8-Max each had a median below $0.20 per review. Claude Sonnet 5.5 came in at $0.42.
+If you want the deepest review, for example on security-sensitive code, pick a Fable model. Fable is the tier Anthropic places above Opus. Fable 5.2 has the lower list price of the two: $8 input and $40 output per 1M tokens, against $10 and $50 for Fable 5.1.
+If a pull request is very large, Claude Fable 5.2 and Fable 5.1 can review the complete change instead of a shortened diff, as long as the change fits the size, cost and time limits for a single review.
+If you already pay a provider, add your own API key. Octopus sends requests through your key and deducts no credits for them, and the provider bills you. Other platform operations, such as embeddings, still use credits.`,
+      },
+      {
+        heading: "How to switch",
+        text: `Open Settings and choose Models, under AI & Reviews.
+For the whole organisation: in Organization Defaults, pick a Review & Chat Model. Reasoning Effort is in the same card.
+For one repository: in Repository Models, find the repository and pick its Review & Chat Model. This overrides the organisation default.
+For your own key: add it under Provider Keys, next to Models in Settings.
+A repository without its own model uses the organisation default. Provider list prices for every model are on the pricing page.`,
       },
     ],
   },

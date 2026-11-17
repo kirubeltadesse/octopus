@@ -1,8 +1,6 @@
 import "server-only";
 import Link from "@/components/link";
 import { ORGANIZATION_ENTITY } from "@/lib/structured-data";
-import { headers } from "next/headers";
-import { auth } from "@/lib/auth";
 import { prisma } from "@octopus/db";
 import { getLandingStats } from "@/lib/landing-stats";
 import { LandingFeatures } from "@/components/landing-features";
@@ -10,7 +8,7 @@ import { TrackedLink, TrackedAnchor } from "@/components/tracked-link";
 import { LandingFooter } from "@/components/landing-footer";
 import { LandingMobileNav } from "@/components/landing-mobile-nav";
 import { LandingDesktopNav } from "@/components/landing-desktop-nav";
-import { LandingAgentPrompt } from "@/components/landing-agent-prompt";
+import { CopySetupPromptButton, LandingAgentPrompt } from "@/components/landing-agent-prompt";
 import { LandingTerminalHero } from "@/components/landing-terminal-hero";
 import { NewsletterForm } from "@/components/landing-newsletter";
 import { CliInstallSection } from "@/components/landing-cli-install";
@@ -102,9 +100,11 @@ const faqJsonLd = {
   })),
 };
 
+// Reads live figures and the newest posts from the database on each request.
+export const dynamic = "force-dynamic";
+
 export default async function LandingPage() {
-  const [session, blogPosts, landingStats, announcements] = await Promise.all([
-    auth.api.getSession({ headers: await headers() }),
+  const [blogPosts, landingStats, announcements] = await Promise.all([
     prisma.blogPost.findMany({
       where: { status: "published", deletedAt: null },
       orderBy: { publishedAt: "desc" },
@@ -138,34 +138,34 @@ export default async function LandingPage() {
       <LandingAnnouncementBar announcements={announcements} />
 
       {/* Mobile nav — hamburger menu */}
-      <LandingMobileNav isLoggedIn={!!session} />
+      <LandingMobileNav />
 
       {/* Desktop nav — floating pill */}
-      <LandingDesktopNav isLoggedIn={!!session} />
+      <LandingDesktopNav />
 
       {/* Hero — dark bg */}
       <section className="relative z-10 px-6 pb-20 pt-40 md:px-8 md:pb-28 md:pt-52">
         <div className="mx-auto grid max-w-6xl grid-cols-1 items-center gap-12 lg:grid-cols-2 lg:gap-12">
          <div className="text-center lg:text-left">
           <h1 className="animate-fade-in text-4xl font-bold leading-[1.1] tracking-tight text-white [animation-delay:100ms] sm:text-5xl md:text-6xl">
-            Give your AI this prompt.
+            AI code review for every pull request.
             <br />
-            <span className="text-primary">Let it handle the rest.</span>
+            <span className="text-primary">Give your AI one prompt to set it up.</span>
           </h1>
 
           <p className="mx-auto mt-6 max-w-2xl text-base leading-relaxed text-[#a0a0a0] sm:text-lg lg:mx-0">
-            Set up Octopus with the AI already working in your project.
-            It installs the CLI, connects your GitHub repository, and gets
-            your code indexed and analysed for context-aware PR reviews.
+            Octopus reviews each pull request on GitHub, GitLab, Bitbucket and
+            Forgejo with the whole repository as context, and posts findings
+            rated by severity.
           </p>
-          <p className="mt-4 text-sm leading-relaxed text-[#a0a0a0]">
+          <div className="mt-8 flex flex-wrap items-center justify-center gap-6 text-sm lg:justify-start">
+            <CopySetupPromptButton />
+            <a href="#cli" className="relative text-[#a0a0a0] underline underline-offset-4 after:absolute after:-inset-x-2 after:-inset-y-3 after:content-[''] hover:text-white focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white">Install the CLI yourself</a>
+          </div>
+          <p className="mt-6 text-sm leading-relaxed text-[#a0a0a0]">
             You approve sign-in and GitHub access through the links it gives you.
             Your AI handles the commands and checks when everything is ready.
           </p>
-          <div className="mt-8 flex flex-wrap justify-center gap-6 text-sm lg:justify-start">
-            <a href="#agent-setup" className="text-white underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white">Get the setup prompt</a>
-            <a href="#cli" className="text-[#a0a0a0] underline underline-offset-4 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white">Install the CLI yourself</a>
-          </div>
          </div>
 
           <div className="min-w-0 animate-fade-in [animation-delay:400ms]">

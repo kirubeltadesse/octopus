@@ -23,6 +23,7 @@ const sections: MenuSection[] = [
     items: [
       { href: "/docs/getting-started", label: "Introduction" },
       { href: "/docs/pricing", label: "Pricing" },
+      { href: "/docs/choosing-a-model", label: "Choosing a model" },
     ],
   },
   {
@@ -84,7 +85,7 @@ export function DocsMobileMenu() {
   return (
     <Sheet open={open} onOpenChange={setOpen}>
       <SheetTrigger
-        className="flex size-9 items-center justify-center rounded-lg text-[#666] transition-colors hover:bg-white/[0.06] hover:text-white lg:hidden"
+        className="relative flex size-9 items-center justify-center rounded-lg text-[#666] transition-colors after:absolute after:-inset-y-1 after:-left-5 after:-right-1 after:content-[''] hover:bg-white/[0.06] hover:text-white lg:hidden"
         aria-label="Open menu"
       >
         <IconMenu2 className="size-5" />
