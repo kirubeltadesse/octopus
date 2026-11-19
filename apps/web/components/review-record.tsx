@@ -1,8 +1,25 @@
+import { isValidElement, type ReactNode } from "react";
 import Link from "next/link";
 import { IconDownload, IconGitPullRequest, IconHistory } from "@tabler/icons-react";
 import { RepositoryAnalysisMarkdown } from "@/components/repository-analysis-markdown";
+import { MermaidDiagram } from "@/components/mermaid-diagram";
 import { Button } from "@/components/ui/button";
 import { canRenderReviewMarkdown } from "@/lib/review-markdown-budget";
+
+const MAX_REVIEW_MERMAID_CHARS = 12_000;
+
+/** Render fenced Mermaid diagrams without changing ordinary Markdown/code rendering. */
+function ReviewCodeBlock({ children }: { children?: ReactNode }) {
+  if (isValidElement<{ className?: string; children?: ReactNode }>(children)
+    && children.props.className === "language-mermaid"
+    && typeof children.props.children === "string") {
+    const code = children.props.children.trim();
+    if (code && code.length <= MAX_REVIEW_MERMAID_CHARS) {
+      return <MermaidDiagram code={code} />;
+    }
+  }
+  return <pre className="my-2 overflow-x-auto rounded-md bg-muted p-3 font-mono text-xs">{children}</pre>;
+}
 
 type HistoryEntry = { id: string; headSha: string | null; createdAt: Date };
 export type ReviewRecord = HistoryEntry & {
@@ -55,6 +72,7 @@ export function ReviewRecordView({ record }: { record: ReviewRecord }) {
           <div className="min-w-0 break-words text-sm [&_table]:my-4 [&_table]:block [&_table]:max-h-96 [&_table]:max-w-full [&_table]:overflow-auto [&_td]:border [&_td]:p-2 [&_th]:border [&_th]:p-2 [&_th]:text-left">
             {canRenderReviewMarkdown(record.reviewBody) ? (
             <RepositoryAnalysisMarkdown content={record.reviewBody} components={{
+              pre: ({ children }) => <ReviewCodeBlock>{children}</ReviewCodeBlock>,
               h1: ({ children }) => <h3 className="my-4 text-lg font-semibold">{children}</h3>,
               h2: ({ children }) => <h3 className="my-4 text-lg font-semibold">{children}</h3>,
               h3: ({ children }) => <h4 className="my-3 font-semibold">{children}</h4>,

@@ -91,6 +91,14 @@ assert.ok(html.includes("Original finding") && html.includes("4/5") && html.incl
 assert.ok(!html.includes("<script") && !html.includes("<img") && !html.includes("tracker.invalid") && !html.includes('href="javascript:'));
 assert.equal(result.record.reviewBody, report, "Rendering preserves the immutable report");
 await saveEvidence("review-page.html", html);
+const mermaidBody = `${report}\n\n### Diagram\n\n\`\`\`mermaid\nflowchart TD\n  A[Change] --> B[Review]\n\`\`\``;
+const mermaidHtml = renderToStaticMarkup(<ReviewRecordView record={{ ...result.record, reviewBody: mermaidBody }} />);
+assert.ok(mermaidHtml.includes("Loading diagram..."), "Mermaid fences render through the diagram component");
+assert.ok(!mermaidHtml.includes("language-mermaid") && !mermaidHtml.includes("flowchart TD"), "Mermaid fences should not be shown as raw code");
+assert.ok(mermaidHtml.includes("language-js") && mermaidHtml.includes("const x = 1;"), "Ordinary code fences still render as code");
+assert.ok(!mermaidHtml.includes("<script") && !mermaidHtml.includes("<img"), "Mermaid handling preserves Markdown HTML protections");
+assert.equal(result.record.reviewBody, report, "Diagram rendering does not mutate archived reviews");
+await saveEvidence("review-mermaid.html", mermaidHtml);
 for (const largeBody of [
   "[".repeat(16_000) + "`a|b`" + "]".repeat(16_000),
   "before ".repeat(10_000) + "<script>alert(1)</script>",
