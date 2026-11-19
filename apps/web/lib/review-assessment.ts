@@ -160,9 +160,16 @@ const FENCE_LINE = /^[ \t]{0,3}(`{3,}|~{3,})/;
 /** Normalize one score-table row (slash spacing and the bold Overall row). */
 function normalizeScoreRow(line: string): string {
   const cells = scoreCells(line);
-  if (cells.length !== 5) return line;
   const label = cells[1]?.trim().replaceAll("**", "");
   if (!label || !SCORE_CATEGORIES.some(category => category === label)) return line;
+  // Model-generated Notes sometimes contain one unescaped "|". Only repair
+  // an otherwise well-formed row with exactly one extra Notes delimiter.
+  if (cells.length === 6 && cells[0].trim() === "" && cells[5].trim() === ""
+    && /^(?:[1-5]\/5|N\/A|Not assessed)$/.test(cells[2].trim().replaceAll("**", ""))
+    && cells[3].trim() && cells[4].trim()) {
+    cells.splice(3, 2, cells[3] + "\\|" + cells[4]);
+  }
+  if (cells.length !== 5) return line;
   cells[2] = cells[2].replace(/^(\s*(?:\*\*)?)([1-5])[ \t]*\/[ \t]*5((?:\*\*)?\s*)$/, "$1$2/5$3");
   if (label === "Overall") {
     const token = cells[2].trim().replaceAll("**", "");

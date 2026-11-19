@@ -112,6 +112,34 @@ describe("legacy formatting variations", () => {
   });
 });
 
+describe("score Notes pipe normalization", () => {
+  const row = "| Error Handling | 5/5 | Explicit errors |";
+
+  it("escapes one unescaped Notes delimiter without changing the score", () => {
+    const text = valid.replace(row, "| Error Handling | 5/5 | Handles errors | retry paths |");
+    const normalized = normalizeReviewResponse(text);
+    expect(normalized).toContain("| Error Handling | 5/5 | Handles errors \\| retry paths |");
+    expect(error(text)).toBeNull();
+    expect(normalizeReviewResponse(normalized)).toBe(normalized);
+  });
+
+  it("preserves an already escaped delimiter", () => {
+    const text = valid.replace(row, "| Error Handling | 5/5 | Handles errors \\| retry paths |");
+    expect(error(text)).toBeNull();
+    expect(normalizeReviewResponse(text)).toBe(text);
+  });
+
+  it("rejects multiple unexpected delimiters", () => {
+    const text = valid.replace(row, "| Error Handling | 5/5 | Handles | errors | retry paths |");
+    expect(error(text)).toBe("Score category rows missing, duplicated or malformed");
+  });
+
+  it("rejects an empty Notes segment", () => {
+    const text = valid.replace(row, "| Error Handling | 5/5 | Handles errors | |");
+    expect(error(text)).toBe("Score category rows missing, duplicated or malformed");
+  });
+});
+
 describe("duplicate headings", () => {
   it("rejects a duplicate report heading", () => {
     expect(error(valid.replace("## 🐙 Octopus Review", "## 🐙 Octopus Review\n\n## 🐙 Octopus Review"))).toBe("Review heading duplicated");
