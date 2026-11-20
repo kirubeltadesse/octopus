@@ -1813,6 +1813,29 @@ model MarketingCashObservation {
 }
 
 // Retained facts use plain repository/PR/archive IDs so deleting a PR preserves them.
+/// Durable identity and bounded claims for multi-pass review requests.
+model ReviewPass {
+  id             String    @id
+  organizationId String
+  repositoryId   String
+  pullRequestId  String
+  requestVersion Int
+  stepKey        String
+  kind           String
+  identity       String
+  claims         Int       @default(0)
+  status         String    @default("pending")
+  result         Json?
+  responseSha256 String?
+  failureCode    String?
+  firstClaimedAt DateTime  @default(now())
+  completedAt    DateTime?
+
+  @@unique([pullRequestId, requestVersion, stepKey])
+  @@index([organizationId, completedAt])
+  @@map("review_passes")
+}
+
 model ReviewAttemptOutcome {
   organizationId String
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)

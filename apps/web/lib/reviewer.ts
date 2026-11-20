@@ -59,11 +59,14 @@ import { parseOctopusIgnore, detectBadCommits } from "@/lib/octopus-ignore";
 import { buildGeneratedMatcher } from "@/lib/generated-files";
 import { MAX_DIFF_CHARS } from "@/lib/diff-truncate";
 import { completeReviewCandidate, isCompleteReviewModel, reviewCandidateSha256, assertReviewProcessingActive, isReviewCancelled, CapacityAdmissionError, ReviewProcessingExpiredError, type CompleteReviewAdmission, type ReviewExecutionWindow } from "@/lib/review-capacity";
+import type { AiResponse } from "@/lib/providers";
 import { AiProviderFailure, safeErrorDetails } from "@/lib/provider-failure";
 import { confirmCompleteReviewCurrent, confirmGenerationRetryCurrent } from "@/lib/review-capacity-current";
 import { prepareReviewInput, applyReviewCoverage, coverageSummary, reviewCheckResult, reviewAssessmentComplete, generationFailureCode, type ReviewInput, type ReviewCoverage } from "@/lib/review-coverage";
 import { prepareReviewComment } from "@/lib/review-comment-context";
 import { createCoveredReviewRequest } from "@/lib/review-request";
+import { planReviewBatches } from "@/lib/review-batching";
+import { executeMultiPassReview, recordMultiPassFailure, MultiPassError } from "@/lib/review-multipass";
 import { buildReReviewContext, type ReReviewDismissedFinding } from "@/lib/review-rereview-context";
 import { canRestrictReviewToFollowUp } from "@/lib/review-follow-up";
 import { prepareRecoveredReviewPresentation, prepareReviewPresentation, mapReviewPresentation, enforceReviewFindingsIntegrity, finalizeReviewPresentation, stripReviewReasoningArtifacts } from "@/lib/review-presentation";
@@ -1405,7 +1408,8 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
       reviewModel, resolvedProvider, executionWindow) : null;
     const preparedInput = candidate ?? baselineInput;
     const candidateSha256 = candidate ? reviewCandidateSha256(candidate) : null;
-    const { diff, coverage, inventoryDiff } = preparedInput;
+    let { diff, coverage } = preparedInput;
+    const { inventoryDiff } = preparedInput;
     attemptCoverage = coverage;
     coverage.reviewRequestVersion = pr.reviewRequestVersion;
     if (checkRunId !== null) coverage.nativeCheckId = String(checkRunId);
@@ -1819,29 +1823,71 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
         fetchRevision,
       }, signal),
     } : undefined;
-    const primaryRequest = createCoveredReviewRequest({
-      model: reviewModel, system: systemPrompt, number: pr.number, title: pr.title,
-      author: pr.author, diff, coverage, comment: pr.triggerCommentBody ?? "",
-      repoConfig: repoConfigUserBlock,
-    });
-    adaptiveProcessingWindow = completeReviewAdmission?.window;
+    const activeSignal = executionWindow?.signal ?? cancellation.signal;
+    const batchPlan = planReviewBatches(reviewInput, { generated: preparationOptions.generated, ignored: preparationOptions.ignored });
+    const useMultiPass = batchPlan.mode === "multi" && !completeReviewAdmission && batchPlan.coverage.complete;
     failureStage = "generation";
-    // Every dispatch, including a redelivered or re-enqueued job, draws on one durable budget per request version.
-    if (!await claimGenerationAttempt(outcomeKey)) throw new Error("Review generation attempts for this request are used up");
-    const response = await executeCoveredReview({ ...primaryRequest, maxRetries: 0, ...(completeReviewAdmission ? { completeReviewAdmission } : {}) },
-      coverage, getSystemPrompt(), request => createAiMessage(request, org.id).catch(async (error: unknown) => {
-        // The provider may have billed a failed request; its usage is unknown and is never charged to the customer.
-        if (error instanceof AiProviderFailure) {
-          await logAiUsage({ provider: error.provider, usedOwnKey: error.keyOwner === "unknown" ? undefined : error.keyOwner === "organization",
-            model: reviewModel, operation: "review-failed-attempt", inputTokens: 0, outputTokens: 0, organizationId: org.id, usageUnknown: true });
-        }
-        throw error;
-      }), { window: executionWindow, confirm: async (failure, signal) => !!coverage.headSha && !!coverage.baseSha
-        && await confirmGenerationRetryCurrent({ pullRequestId: pr.id, orgId: org.id, repoId: repo.id, model: reviewModel, provider: failure.provider,
-          headSha: coverage.headSha, baseSha: coverage.baseSha, reviewRequestVersion: pr.reviewRequestVersion, fetchRevision }, signal) === null
-        // shortcut: a claim that lands just after the admission deadline uses the unit without a dispatch, so a
-        // redelivery is refused; release the unit on a failed admission if that ever shows up in production.
-        && await credentialRouteUnchanged(failure, org.id) && !signal.aborted && await claimGenerationAttempt(outcomeKey) });
+    let response: AiResponse;
+    if (useMultiPass) {
+      // Multi-pass reviews are planned from the full fetched input so no eligible
+      // file is omitted merely to fit one provider request.
+      diff = batchPlan.diff;
+      coverage = batchPlan.coverage;
+      coverage.reviewRequestVersion = pr.reviewRequestVersion;
+      if (checkRunId !== null) coverage.nativeCheckId = String(checkRunId);
+      coverage.comment = commentContext.receipt;
+      attemptCoverage = coverage;
+      const reviewProvider = await getProviderForModel(reviewModel);
+      const confirmCurrent = (signal: AbortSignal) => confirmGenerationRetryCurrent({ pullRequestId: pr.id, orgId: org.id, repoId: repo.id,
+        model: reviewModel, provider: reviewProvider, headSha: coverage.headSha!, baseSha: coverage.baseSha!,
+        reviewRequestVersion: pr.reviewRequestVersion, fetchRevision }, signal);
+      response = await executeMultiPassReview({
+        plan: batchPlan, coverage, organizationId: org.id, repositoryId: repo.id, pullRequestId: pr.id,
+        requestVersion: pr.reviewRequestVersion, model: reviewModel, number: pr.number, title: pr.title,
+        author: pr.author, comment: pr.triggerCommentBody ?? "", repoConfig: repoConfigUserBlock,
+        systemPrompt, template: getSystemPrompt(), window: executionWindow, signal: activeSignal,
+        call: request => createAiMessage(request, org.id).catch(async (error: unknown) => {
+          if (error instanceof AiProviderFailure) {
+            await logAiUsage({ provider: error.provider, usedOwnKey: error.keyOwner === "unknown" ? undefined : error.keyOwner === "organization",
+              model: reviewModel, operation: "review-failed-attempt", inputTokens: 0, outputTokens: 0, organizationId: org.id, usageUnknown: true });
+          }
+          throw error;
+        }),
+        confirmCurrent,
+        credentialUnchanged: failure => credentialRouteUnchanged(failure, org.id),
+        // Each batch is metered under its own idempotent key; synthesis is metered
+        // below through the existing single review-generation charge.
+        onUsage: async (stepKey, result) => {
+          if (stepKey === "synthesis") return;
+          await logAiUsage({ provider: result.provider, usedOwnKey: result.usedOwnKey, model: reviewModel,
+            operation: "review-batch", chargeKey: `review-multipass:${pr.id}:${pr.reviewRequestVersion}:${stepKey}`,
+            inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens,
+            cacheReadTokens: result.usage.cacheReadTokens, cacheWriteTokens: result.usage.cacheWriteTokens,
+            organizationId: org.id });
+        },
+      });
+    } else {
+      const primaryRequest = createCoveredReviewRequest({
+        model: reviewModel, system: systemPrompt, number: pr.number, title: pr.title,
+        author: pr.author, diff, coverage, comment: pr.triggerCommentBody ?? "",
+        repoConfig: repoConfigUserBlock,
+      });
+      adaptiveProcessingWindow = completeReviewAdmission?.window;
+      // Every dispatch, including a redelivered or re-enqueued job, draws on one durable budget per request version.
+      if (!await claimGenerationAttempt(outcomeKey)) throw new Error("Review generation attempts for this request are used up");
+      response = await executeCoveredReview({ ...primaryRequest, maxRetries: 0, ...(completeReviewAdmission ? { completeReviewAdmission } : {}) },
+        coverage, getSystemPrompt(), request => createAiMessage(request, org.id).catch(async (error: unknown) => {
+          // The provider may have billed a failed request; its usage is unknown and is never charged to the customer.
+          if (error instanceof AiProviderFailure) {
+            await logAiUsage({ provider: error.provider, usedOwnKey: error.keyOwner === "unknown" ? undefined : error.keyOwner === "organization",
+              model: reviewModel, operation: "review-failed-attempt", inputTokens: 0, outputTokens: 0, organizationId: org.id, usageUnknown: true });
+          }
+          throw error;
+        }), { window: executionWindow, confirm: async (failure, signal) => !!coverage.headSha && !!coverage.baseSha
+          && await confirmGenerationRetryCurrent({ pullRequestId: pr.id, orgId: org.id, repoId: repo.id, model: reviewModel, provider: failure.provider,
+            headSha: coverage.headSha, baseSha: coverage.baseSha, reviewRequestVersion: pr.reviewRequestVersion, fetchRevision }, signal) === null
+          && await credentialRouteUnchanged(failure, org.id) && !signal.aborted && await claimGenerationAttempt(outcomeKey) });
+    }
     const assertProcessingActive = () => { if (completeReviewAdmission) assertReviewProcessingActive(completeReviewAdmission.window); };
 
     let reviewBody = prepareReviewPresentation(response.text, coverage);
@@ -2643,6 +2689,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
       console.log(`[reviewer] Review cancelled; suppressing failure handling for PR #${pr.number}`);
       return;
     }
+    if (err instanceof MultiPassError && attemptCoverage) recordMultiPassFailure(attemptCoverage, err.failure);
     const reportingError = err;
     const cancelled = isReviewCancelled(executionWindow);
     if (adaptiveProcessingWindow
@@ -2660,6 +2707,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
         : failureStage === "preparation" ? "Review failed during preparation"
         : failureStage === "publication" ? "Review failed while publishing the review"
         : failureStage === "generation" && !(err instanceof AiProviderFailure || err instanceof CapacityAdmissionError) ? "Review failed during generation"
+        : err instanceof MultiPassError ? `Multi-pass review failed at ${err.failure.stage}${err.failure.stepKey ? ` (${err.failure.stepKey})` : ""}: ${err.failure.code}`
         : err instanceof Error ? err.message : "Unknown error";
     console.error(`[reviewer] Review failed for PR #${pr.number}:`, failureStage === "indexing" ? errorMessage : safeErrorDetails(err instanceof AiProviderFailure || err instanceof CapacityAdmissionError ? err.details : err));
 
