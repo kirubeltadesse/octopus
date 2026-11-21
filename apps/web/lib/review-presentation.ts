@@ -1,10 +1,10 @@
-import type { InlineFinding } from "@/lib/review-dedup";
+import { FINDINGS_END_MARKER, FINDINGS_START_MARKER, type InlineFinding } from "@/lib/review-dedup";
 import type { ReviewCoverage } from "@/lib/review-coverage";
 import { applyReviewCoverage, reviewAssessmentComplete } from "@/lib/review-coverage";
-import { validReviewFindings, markReviewAssessmentIncomplete } from "@/lib/review-assessment";
+import { validReviewFindings, markReviewAssessmentIncomplete, reviewResponseValidationError } from "@/lib/review-assessment";
 import { normalizeLastReviewedCommit, normalizeScoreDenominators, reconcileScoreTable } from "@/lib/review-helpers";
 import { sanitizeMermaidInMarkdown } from "@/lib/mermaid-utils";
-import { containExcludedInputClaims, parseReviewFindingsSet, recoveryFindingsBody, parseRecoveryFindingsSet, excludedInputGapReport } from "@/lib/review-evidence";
+import { containExcludedInputClaims, recoveryFindingsBody, parseRecoveryFindingsSet, excludedInputGapReport } from "@/lib/review-evidence";
 import { stripReasoningArtifacts } from "@/lib/review-github-summary";
 
 function findingsBlocks(body: string): string[] {
@@ -73,6 +73,27 @@ export function finalizeReviewPresentation(
   return { report: finalize(report), comment: finalize(comment) };
 }
 
+/**
+ * Merge follow-up findings into a report that has at most one canonical findings block.
+ * Returns null when the report already carries more than one block, carries a malformed
+ * marker, or the merged candidate does not pass the same validation as a primary response.
+ * A null result means the caller must keep the primary report untouched.
+ */
+export function mergeRecoveredFindings(body: string, recovered: InlineFinding[], existing: InlineFinding[], coverage: ReviewCoverage): string | null {
+  if (recovered.length === 0) return null;
+  const blocks = findingsBlocks(body);
+  if (blocks.length > 1) return null;
+  if (blocks.length === 0 && /OCTOPUS_FINDINGS_(?:START|END)/.test(body)) return null;
+  const seen = new Set(existing.map(finding => `${finding.filePath}:${finding.title}`));
+  const merged = [...existing, ...recovered.filter(finding => !seen.has(`${finding.filePath}:${finding.title}`))];
+  if (merged.length === 0) return null;
+  const canonical = `${FINDINGS_START_MARKER}\n\`\`\`json\n${JSON.stringify(merged, null, 2)}\n\`\`\`\n${FINDINGS_END_MARKER}`;
+  const candidate = blocks.length === 1
+    ? body.replace(/<!-- OCTOPUS_FINDINGS_START -->[\s\S]*?<!-- OCTOPUS_FINDINGS_END -->/, canonical)
+    : `${body.trimEnd()}\n\n${canonical}`;
+  return validReviewFindings(candidate) && reviewResponseValidationError(candidate, coverage.complete) === null ? candidate : null;
+}
+
 export function prepareRecoveredReviewPresentation(body: string, rawRecovery: string, findings: InlineFinding[], coverage: ReviewCoverage): string | null {
   const recoveryBody = recoveryFindingsBody(rawRecovery);
   if (parseRecoveryFindingsSet(rawRecovery) === null) {
@@ -81,9 +102,10 @@ export function prepareRecoveredReviewPresentation(body: string, rawRecovery: st
     markExcludedInputAssessment(coverage);
     return prepareReviewPresentation(excludedInputGapReport(rejected.paths, body), coverage);
   }
-  const intact = parseReviewFindingsSet(body) !== null;
-  const presentation = intact ? body.replace(/<!-- OCTOPUS_FINDINGS_START -->[\s\S]*?<!-- OCTOPUS_FINDINGS_END -->/g, "") : body;
-  const combined = `${presentation}\n<!-- OCTOPUS_FINDINGS_START -->\n${JSON.stringify(findings)}\n<!-- OCTOPUS_FINDINGS_END -->`;
+  const blocks = findingsBlocks(body);
+  if (blocks.length > 1 || (blocks.length === 0 && /OCTOPUS_FINDINGS_(?:START|END)/.test(body))) return null;
+  const presentation = blocks.length === 1 ? body.replace(/<!-- OCTOPUS_FINDINGS_START -->[\s\S]*?<!-- OCTOPUS_FINDINGS_END -->/g, "") : body;
+  const combined = `${presentation}\n${FINDINGS_START_MARKER}\n${JSON.stringify(findings)}\n${FINDINGS_END_MARKER}`;
   const contained = containExcludedInputClaims(combined, coverage);
   if (contained.paths.length === 0) return null;
   markExcludedInputAssessment(coverage);

@@ -69,7 +69,7 @@ import { planReviewBatches } from "@/lib/review-batching";
 import { executeMultiPassReview, recordMultiPassFailure, MultiPassError } from "@/lib/review-multipass";
 import { buildReReviewContext, type ReReviewDismissedFinding } from "@/lib/review-rereview-context";
 import { canRestrictReviewToFollowUp } from "@/lib/review-follow-up";
-import { prepareRecoveredReviewPresentation, prepareReviewPresentation, mapReviewPresentation, enforceReviewFindingsIntegrity, finalizeReviewPresentation, stripReviewReasoningArtifacts } from "@/lib/review-presentation";
+import { prepareRecoveredReviewPresentation, prepareReviewPresentation, mapReviewPresentation, enforceReviewFindingsIntegrity, finalizeReviewPresentation, mergeRecoveredFindings, stripReviewReasoningArtifacts } from "@/lib/review-presentation";
 import { extractOverallScore, formatCheckRunTitle, formatGitHubReviewSummary, formatInvalidAssessmentSummary } from "@/lib/review-github-summary";
 import { executeCoveredReview, executeFindingsRecovery, recordNoModelAssessment, markReviewAssessmentIncomplete } from "@/lib/review-assessment";
 import { saveReviewAttempt, createReviewAttemptComment, updateCurrentReview, withForgejoReviewPublication, recordFirstReviewCompletion, recordInterruptedAttempt } from "@/lib/review-attempt";
@@ -113,7 +113,6 @@ import { indexRepository } from "@/lib/indexer";
 import {
   type PriorFinding,
   FINDINGS_START_MARKER,
-  FINDINGS_END_MARKER,
   extractDiffFiles,
   parseFindings,
   extractKeywords,
@@ -1996,20 +1995,26 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
             }
           }
           if (followUpFindings && followUpFindings.length > 0) {
-            // Merge: add only findings not already present (by file+title dedup)
-            const existingKeys = new Set(findings.map((f) => `${f.filePath}:${f.title}`));
-            const newFindings = followUpFindings.filter((f) => !existingKeys.has(`${f.filePath}:${f.title}`));
-            findings = [...findings, ...newFindings];
-            // Append findings block to reviewBody so it gets stored in DB
-            effectiveReviewBody = `${reviewBody}\n\n${FINDINGS_START_MARKER}\n\`\`\`json\n${JSON.stringify(followUpFindings, null, 2)}\n\`\`\`\n${FINDINGS_END_MARKER}`;
-            const containedRecovery = prepareRecoveredReviewPresentation(reviewBody, findingsBlock, findings, coverage);
-            if (containedRecovery !== null) {
-              reviewBody = containedRecovery;
-              effectiveReviewBody = containedRecovery;
-              mainCommentBody = stripDetailedFindings(containedRecovery);
-              findings = parseFindings(containedRecovery);
+            // Never append a second findings block: replace the existing block or add
+            // exactly one. Adoption is fail-closed and only happens when the merged
+            // candidate passes the same validation as a primary response.
+            const recoveredBody = mergeRecoveredFindings(reviewBody, followUpFindings, findings, coverage);
+            if (recoveredBody !== null) {
+              reviewBody = recoveredBody;
+              effectiveReviewBody = recoveredBody;
+              mainCommentBody = stripDetailedFindings(recoveredBody);
+              findings = parseFindings(recoveredBody);
+              const containedRecovery = prepareRecoveredReviewPresentation(reviewBody, findingsBlock, findings, coverage);
+              if (containedRecovery !== null) {
+                reviewBody = containedRecovery;
+                effectiveReviewBody = containedRecovery;
+                mainCommentBody = stripDetailedFindings(containedRecovery);
+                findings = parseFindings(containedRecovery);
+              }
+              console.log(`[reviewer] Follow-up recovered findings; report updated with one canonical block (${findings.length} combined) (provider: ${repo.provider}, pr: #${pr.number})`);
+            } else {
+              console.warn(`[reviewer] Follow-up findings were not adopted: the report has ambiguous or duplicate findings markers (provider: ${repo.provider}, pr: #${pr.number})`);
             }
-            console.log(`[reviewer] Follow-up recovered ${newFindings.length} new findings (${followUpFindings.length} total from follow-up, ${findings.length} combined) (provider: ${repo.provider}, pr: #${pr.number})`);
           } else {
             console.warn(`[reviewer] Follow-up also returned no parseable findings (provider: ${repo.provider}, pr: #${pr.number})`);
           }

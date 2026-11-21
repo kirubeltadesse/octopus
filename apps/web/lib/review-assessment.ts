@@ -2,7 +2,7 @@ import type { AiCreateParams, AiResponse } from "@/lib/providers";
 import type { AiRequestReceipt } from "@/lib/providers/request-evidence";
 import { sha256, type ReviewCoverage } from "@/lib/review-coverage";
 import { parseRecoveryFindingsSet, recoveryFindingsBody } from "@/lib/review-evidence";
-import { parseFindingsFromJson, type InlineFinding } from "@/lib/review-dedup";
+import { FINDINGS_END_MARKER, FINDINGS_START_MARKER, parseFindingsFromJson, type InlineFinding } from "@/lib/review-dedup";
 import { CapacityAdmissionError, markCapacityNotDispatched, admitGenerationRetry, withinReviewWindow, isReviewCancelled, COMPLETE_REVIEW_POLICY, GENERATION_RETRY, type CapacityAdmissionReceipt, type ReviewExecutionWindow } from "./review-capacity";
 import { AiProviderFailure, classifyFailure, safeErrorDetails, type FailureClass, type KeyOwner } from "./provider-failure";
 
@@ -109,15 +109,19 @@ export async function executeFindingsRecovery(
   evidence.reason = !observed ? "Actual findings recovery request provenance unavailable"
     : response.completion?.state !== "completed" ? "Findings recovery completion incomplete or unknown"
       : "Provider completed the findings recovery response; source assessment unchanged";
-  const body = recoveryFindingsBody(response.text);
-  const valid = parseRecoveryFindingsSet(response.text) !== null;
+  // Normalize presentation markers before parsing so a harmless spacing defect
+  // does not hide a valid recovery. The raw response hash above stays the source
+  // of truth for provenance.
+  const normalizedText = normalizeReviewResponse(response.text);
+  const body = recoveryFindingsBody(normalizedText);
+  const valid = parseRecoveryFindingsSet(normalizedText) !== null;
   if (!valid) {
     const reason = "Findings recovery JSON set is malformed";
     evidence.state = "incomplete";
     evidence.reason = `${evidence.reason}; ${reason}`;
     markReviewAssessmentIncomplete(coverage, `${assessment.reason}; ${reason}`);
   }
-  return { ...response, findings: valid ? parseFindingsFromJson(body) ?? [] : null };
+  return { ...response, text: normalizedText, findings: valid ? parseFindingsFromJson(body) ?? [] : null };
 }
 
 const REVIEW_HEADING = "## 🐙 Octopus Review";
@@ -184,12 +188,20 @@ function normalizeScoreRow(line: string): string {
 }
 
 /**
+ * A complete findings marker line with harmless spacing variation. The canonical form is
+ * `<!-- OCTOPUS_FINDINGS_START -->` / `<!-- OCTOPUS_FINDINGS_END -->`; models occasionally
+ * drop the space before `-->`. Matching the whole line keeps prose and code examples out.
+ */
+const FINDINGS_MARKER_LINE = /^[ \t]*<!--[ \t]*OCTOPUS_FINDINGS_(START|END)[ \t]*-->[ \t]*$/;
+
+/**
  * Canonicalize presentation shapes that models vary without changing the meaning of the
  * review, so validation judges structure rather than typography. Rewrites only heading
- * lines and score-table rows outside fenced code: a report heading suffix or level,
- * `Summary`/`Score`/`Findings Summary` heading case, emoji, level or ATX closing marks,
- * horizontal spacing around score slashes, and an Overall row whose cells are not bold.
- * It never adds a missing section or merges duplicate substantive headings.
+ * lines, score-table rows and complete findings marker lines outside fenced code: a report
+ * heading suffix or level, `Summary`/`Score`/`Findings Summary` heading case, emoji, level
+ * or ATX closing marks, horizontal spacing around score slashes, an Overall row whose cells
+ * are not bold, and a findings marker missing the space before `-->`. It never adds a
+ * missing section, merges duplicate substantive headings, or touches findings JSON bytes.
  */
 export function normalizeReviewResponse(text: string): string {
   const source = text.replace(/^\uFEFF/, "");
@@ -206,6 +218,11 @@ export function normalizeReviewResponse(text: string): string {
       continue;
     }
     if (fence !== null) { normalized.push(line); continue; }
+    const findingsMarker = FINDINGS_MARKER_LINE.exec(line);
+    if (findingsMarker) {
+      normalized.push(findingsMarker[1] === "START" ? FINDINGS_START_MARKER : FINDINGS_END_MARKER);
+      continue;
+    }
     if (REPORT_HEADING_LINE.test(line)) { normalized.push(REVIEW_HEADING); inScore = false; continue; }
     if (SUMMARY_HEADING_LINE.test(line)) { normalized.push("### Summary"); inScore = false; continue; }
     if (SCORE_HEADING_LINE.test(line)) { normalized.push("### Score"); inScore = true; continue; }
@@ -334,7 +351,8 @@ function findingsSummarySection(text: string): { headings: number; section: stri
   return { headings: 1, section: lines.slice(headings[0] + 1, end).join("\n") };
 }
 
-function reviewFindingsValidationError(text: string): string | null {
+function reviewFindingsValidationError(input: string): string | null {
+  const text = normalizeReviewResponse(input);
   const matches = [...text.matchAll(/<!-- OCTOPUS_FINDINGS_START -->\s*([\s\S]*?)\s*<!-- OCTOPUS_FINDINGS_END -->/g)];
   if (matches.length !== 1
     || text.split("<!-- OCTOPUS_FINDINGS_START -->").length !== 2
