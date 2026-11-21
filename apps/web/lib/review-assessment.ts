@@ -105,7 +105,8 @@ export async function executeFindingsRecovery(
   evidence.completion = response.completion ?? null;
   const observed = evidence.requests.length === 1 && evidence.requests[0].model === response.model
     && evidence.requests[0].provider === response.provider && evidence.requests[0].inputPreserved;
-  evidence.state = observed && response.completion?.state === "completed" ? "completed" : "incomplete";
+  const verified = observed && response.completion?.state === "completed";
+  evidence.state = verified ? "completed" : "incomplete";
   evidence.reason = !observed ? "Actual findings recovery request provenance unavailable"
     : response.completion?.state !== "completed" ? "Findings recovery completion incomplete or unknown"
       : "Provider completed the findings recovery response; source assessment unchanged";
@@ -121,7 +122,7 @@ export async function executeFindingsRecovery(
     evidence.reason = `${evidence.reason}; ${reason}`;
     markReviewAssessmentIncomplete(coverage, `${assessment.reason}; ${reason}`);
   }
-  return { ...response, text: normalizedText, findings: valid ? parseFindingsFromJson(body) ?? [] : null };
+  return { ...response, text: normalizedText, findings: verified && valid ? parseFindingsFromJson(body) ?? [] : null };
 }
 
 const REVIEW_HEADING = "## 🐙 Octopus Review";

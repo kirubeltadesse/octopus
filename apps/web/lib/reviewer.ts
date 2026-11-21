@@ -1985,6 +1985,8 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
           });
 
           const followUpFindings = followUp.findings;
+          const recoveries = coverage.assessment?.recoveries;
+          const recoveryVerified = recoveries?.[recoveries.length - 1]?.state === "completed";
           if (followUpFindings === null) {
             const rejected = prepareRecoveredReviewPresentation(reviewBody, findingsBlock, [], coverage);
             if (rejected !== null) {
@@ -1994,7 +1996,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
               findings = parseFindings(rejected);
             }
           }
-          if (followUpFindings && followUpFindings.length > 0) {
+          if (followUpFindings && followUpFindings.length > 0 && recoveryVerified) {
             // Never append a second findings block: replace the existing block or add
             // exactly one. Adoption is fail-closed and only happens when the merged
             // candidate passes the same validation as a primary response.
@@ -2015,6 +2017,8 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
             } else {
               console.warn(`[reviewer] Follow-up findings were not adopted: the report has ambiguous or duplicate findings markers (provider: ${repo.provider}, pr: #${pr.number})`);
             }
+          } else if (followUpFindings && followUpFindings.length > 0) {
+            console.warn(`[reviewer] Follow-up findings were withheld: recovery completion or request provenance unverified (provider: ${repo.provider}, pr: #${pr.number})`);
           } else {
             console.warn(`[reviewer] Follow-up also returned no parseable findings (provider: ${repo.provider}, pr: #${pr.number})`);
           }

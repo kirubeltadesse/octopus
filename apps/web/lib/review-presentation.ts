@@ -1,7 +1,7 @@
 import { FINDINGS_END_MARKER, FINDINGS_START_MARKER, type InlineFinding } from "@/lib/review-dedup";
 import type { ReviewCoverage } from "@/lib/review-coverage";
 import { applyReviewCoverage, reviewAssessmentComplete } from "@/lib/review-coverage";
-import { validReviewFindings, markReviewAssessmentIncomplete, reviewResponseValidationError } from "@/lib/review-assessment";
+import { validReviewFindings, markReviewAssessmentIncomplete, normalizeReviewResponse, reviewResponseValidationError } from "@/lib/review-assessment";
 import { normalizeLastReviewedCommit, normalizeScoreDenominators, reconcileScoreTable } from "@/lib/review-helpers";
 import { sanitizeMermaidInMarkdown } from "@/lib/mermaid-utils";
 import { containExcludedInputClaims, recoveryFindingsBody, parseRecoveryFindingsSet, excludedInputGapReport } from "@/lib/review-evidence";
@@ -73,24 +73,48 @@ export function finalizeReviewPresentation(
   return { report: finalize(report), comment: finalize(comment) };
 }
 
+function findingIdentity(finding: InlineFinding): string {
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, canonical(item)]));
+    }
+    return value;
+  };
+  return JSON.stringify(canonical(finding));
+}
+
 /**
  * Merge follow-up findings into a report that has at most one canonical findings block.
- * Returns null when the report already carries more than one block, carries a malformed
- * marker, or the merged candidate does not pass the same validation as a primary response.
- * A null result means the caller must keep the primary report untouched.
+ * Identical records sharing a file path and title collapse into one; conflicting records
+ * sharing that key are rejected rather than discarded. Returns null when the report has
+ * ambiguous markers or the merged candidate fails primary validation. A null result means
+ * the caller must keep the primary report untouched.
  */
 export function mergeRecoveredFindings(body: string, recovered: InlineFinding[], existing: InlineFinding[], coverage: ReviewCoverage): string | null {
   if (recovered.length === 0) return null;
-  const blocks = findingsBlocks(body);
+  const normalizedBody = normalizeReviewResponse(body);
+  const blocks = findingsBlocks(normalizedBody);
   if (blocks.length > 1) return null;
-  if (blocks.length === 0 && /OCTOPUS_FINDINGS_(?:START|END)/.test(body)) return null;
-  const seen = new Set(existing.map(finding => `${finding.filePath}:${finding.title}`));
-  const merged = [...existing, ...recovered.filter(finding => !seen.has(`${finding.filePath}:${finding.title}`))];
+  if (blocks.length === 0 && /OCTOPUS_FINDINGS_(?:START|END)/.test(normalizedBody)) return null;
+  const byKey = new Map<string, InlineFinding>();
+  const add = (finding: InlineFinding): boolean => {
+    const key = `${finding.filePath}:${finding.title}`;
+    const prior = byKey.get(key);
+    if (prior) return findingIdentity(prior) === findingIdentity(finding);
+    byKey.set(key, finding);
+    return true;
+  };
+  for (const finding of existing) if (!add(finding)) return null;
+  for (const finding of recovered) if (!add(finding)) return null;
+  const merged = [...byKey.values()];
   if (merged.length === 0) return null;
   const canonical = `${FINDINGS_START_MARKER}\n\`\`\`json\n${JSON.stringify(merged, null, 2)}\n\`\`\`\n${FINDINGS_END_MARKER}`;
   const candidate = blocks.length === 1
-    ? body.replace(/<!-- OCTOPUS_FINDINGS_START -->[\s\S]*?<!-- OCTOPUS_FINDINGS_END -->/, canonical)
-    : `${body.trimEnd()}\n\n${canonical}`;
+    ? normalizedBody.replace(/<!-- OCTOPUS_FINDINGS_START -->[\s\S]*?<!-- OCTOPUS_FINDINGS_END -->/, canonical)
+    : `${normalizedBody.trimEnd()}\n\n${canonical}`;
   return validReviewFindings(candidate) && reviewResponseValidationError(candidate, coverage.complete) === null ? candidate : null;
 }
 
