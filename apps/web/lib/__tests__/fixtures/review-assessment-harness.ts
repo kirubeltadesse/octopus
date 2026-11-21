@@ -82,9 +82,15 @@ for (const note of [String.raw`literal a\|b`, String.raw`literal a\\\|b`]) {
   assert.ok(normalizeReviewResponse(text).includes(note));
   assert.ok(normalizeReviewResponse(text).includes("**4/5**"));
 }
+for (const [note, escaped] of [
+  [String.raw`literal a\\|b`, String.raw`literal a\\\|b`],
+  ["unescaped | separator", "unescaped \\| separator"],
+]) {
+  const text = valid.replace("No security finding", note);
+  assert.equal(reviewResponseValidationError(text), null);
+  assert.ok(normalizeReviewResponse(text).includes(`| Security | 5/5 | ${escaped} |`));
+}
 for (const text of [
-  valid.replace("No security finding", String.raw`literal a\\|b`),
-  valid.replace("No security finding", "unescaped | separator"),
   valid.replace("| Security | 5/5 | No security finding |\n", ""),
   valid.replace("| Security |", "| Security | 5/5 | duplicate |\n| Security |"),
   ...["0 / 5", "6 / 5", "4.5 / 5", "5 / 10", "5 / 5 injected"].map(score => valid.replace("| Security | 5/5 |", `| Security | ${score} |`)),
@@ -247,7 +253,7 @@ for (const [name, text, finish, complete] of [
   ["advisory-incomplete-provider", withAdvisory(valid), "length", false],
   ["score-note-words", valid.replace("No security finding", "Validated one or three choices"), "stop", true],
   ["score-note-escaped-code", valid.replace("No security finding", "Validated `1\\|3` choices").replace("Lowest category", "Validated `1\\|3` choices"), "stop", true],
-  ["score-note-unescaped-code", valid.replace("No security finding", "Validated `1|3` choices"), "stop", false],
+  ["score-note-unescaped-code", valid.replace("No security finding", "Validated `1|3` choices"), "stop", true],
   ["valid", valid, "stop", true],
   ["unassessed-complete-input", unassessed, "stop", false],
   ["rereview-valid", valid, "stop", true],
