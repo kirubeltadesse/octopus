@@ -3,7 +3,7 @@ import type { AiCreateParams } from "@/lib/providers";
 import { completionEvidence } from "@/lib/providers/request-evidence";
 import { FINDINGS_END_MARKER, FINDINGS_START_MARKER, parseFindings, type InlineFinding } from "@/lib/review-dedup";
 import { executeCoveredReview, executeFindingsRecovery, normalizeReviewResponse, reviewResponseValidationError, validReviewFindings } from "@/lib/review-assessment";
-import { mergeRecoveredFindings, prepareReviewPresentation } from "@/lib/review-presentation";
+import { classifyFindingsMarkers, mergeRecoveredFindings, prepareRecoveredReviewPresentation, prepareReviewPresentation } from "@/lib/review-presentation";
 import { countFindingsFromTable } from "@/lib/review-helpers";
 import { sha256, type ReviewCoverage } from "@/lib/review-coverage";
 import { PR461_FINDINGS_RESPONSE } from "./fixtures/pr461-findings-response";
@@ -337,5 +337,86 @@ describe("single malformed END in the primary response", () => {
     expect(cov.assessment?.responseValidation?.state).toBe("valid");
     expect(cov.assessment?.state).toBe("completed");
     expect(cov.assessment?.recoveries).toBeUndefined();
+  });
+});
+
+describe("strict findings marker classification", () => {
+  const jsonBlock = (findings: InlineFinding[]) => `\`\`\`json\n${JSON.stringify(findings, null, 2)}\n\`\`\``;
+  const withSection = (section: string, high = 1) => report([], { block: false, high }).replace("### Findings\n", `### Findings\n${section}\n`);
+  const recoveryBody = `${START}\n${jsonBlock([high("Recovered")])}\n${END}`;
+
+  it("replaces a single valid block and validates the candidate", () => {
+    const body = withSection(`${START}\n${jsonBlock([high("A")])}\n${END}`, 2);
+    expect(classifyFindingsMarkers(normalizeReviewResponse(body))).toEqual({ kind: "single-valid" });
+    const merged = mergeRecoveredFindings(body, [high("B")], [high("A")], coverage);
+    expect(merged).not.toBeNull();
+    expect(merged!.split(START).length - 1).toBe(1);
+    expect(merged!.split(END).length - 1).toBe(1);
+    expect(merged).toContain("src/B.ts");
+    expect(reviewResponseValidationError(merged!)).toBeNull();
+  });
+
+  it("inserts one block when markers are absent", () => {
+    const body = withSection("", 1);
+    expect(classifyFindingsMarkers(normalizeReviewResponse(body))).toEqual({ kind: "absent" });
+    const merged = mergeRecoveredFindings(body, [high("A")], [], coverage);
+    expect(merged).not.toBeNull();
+    expect(merged!.split(START).length - 1).toBe(1);
+    expect(reviewResponseValidationError(merged!)).toBeNull();
+  });
+
+  it("rejects START → START → END that the block regex matched as one block", () => {
+    const body = withSection(`${START}\n${jsonBlock([high("A")])}\n\n${START}\n${jsonBlock([high("B")])}\n${END}`, 2);
+    expect(classifyFindingsMarkers(normalizeReviewResponse(body)).kind).toBe("ambiguous");
+    expect(mergeRecoveredFindings(body, [high("B")], [high("A")], coverage)).toBeNull();
+    expect(prepareRecoveredReviewPresentation(body, recoveryBody, [high("A"), high("B")], recoveryCoverage())).toBeNull();
+  });
+
+  for (const [name, section] of [
+    ["START → END → END", `${START}\n[]\n${END}\n${END}`],
+    ["START → START → END → END", `${START}\n[]\n${START}\n[]\n${END}\n${END}`],
+    ["END → START", `${END}\n[]\n${START}`],
+    ["START without END", `${START}\n[]`],
+    ["END without START", `${END}\n[]`],
+    ["two complete blocks", `${START}\n[]\n${END}\n${START}\n[]\n${END}`],
+  ]) {
+    it(`rejects ${name}`, () => {
+      const body = withSection(section);
+      expect(classifyFindingsMarkers(normalizeReviewResponse(body)).kind).toBe("ambiguous");
+      expect(mergeRecoveredFindings(body, [high("B")], [], coverage)).toBeNull();
+      expect(prepareRecoveredReviewPresentation(body, recoveryBody, [high("B")], recoveryCoverage())).toBeNull();
+    });
+  }
+
+  it("rejects malformed marker fragments that normalization cannot repair", () => {
+    const body = withSection(`\`\`\`md\n<!-- OCTOPUS_FINDINGS_END-->\n\`\`\`\n${START}\n${jsonBlock([high("A")])}\n${END}`);
+    expect(classifyFindingsMarkers(normalizeReviewResponse(body)).kind).toBe("ambiguous");
+    expect(mergeRecoveredFindings(body, [high("B")], [high("A")], coverage)).toBeNull();
+    expect(prepareRecoveredReviewPresentation(body, recoveryBody, [high("A"), high("B")], recoveryCoverage())).toBeNull();
+  });
+
+  it("normalizes one harmless whitespace variation and still accepts the block", () => {
+    const body = withSection(`  <!--  OCTOPUS_FINDINGS_START  -->\n${jsonBlock([high("A")])}\n<!-- OCTOPUS_FINDINGS_END-->`, 2);
+    expect(classifyFindingsMarkers(normalizeReviewResponse(body))).toEqual({ kind: "single-valid" });
+    const merged = mergeRecoveredFindings(body, [high("B")], [high("A")], coverage);
+    expect(merged).not.toBeNull();
+    expect(reviewResponseValidationError(merged!)).toBeNull();
+  });
+
+  it("continues rejecting the PR 461 duplicate-block fixture", () => {
+    expect(classifyFindingsMarkers(normalizeReviewResponse(PR461_FINDINGS_RESPONSE)).kind).toBe("ambiguous");
+    expect(mergeRecoveredFindings(PR461_FINDINGS_RESPONSE, [high("B")], [high("A")], coverage)).toBeNull();
+  });
+
+  it("both recovery entry points preserve the original report on ambiguous markers", () => {
+    const body = withSection(`${START}\n${jsonBlock([high("A")])}\n\n${START}\n${jsonBlock([high("B")])}\n${END}`, 2);
+    const original = body;
+    const cov = recoveryCoverage();
+    const reason = cov.assessment!.reason;
+    expect(mergeRecoveredFindings(body, [high("B")], [high("A")], cov)).toBeNull();
+    expect(prepareRecoveredReviewPresentation(body, recoveryBody, [high("A"), high("B")], cov)).toBeNull();
+    expect(body).toBe(original);
+    expect(cov.assessment!.reason).toBe(reason);
+    expect(cov.assessment!.state).toBe("incomplete");
   });
 });

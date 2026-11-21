@@ -11,6 +11,38 @@ function findingsBlocks(body: string): string[] {
   return body.match(/<!-- OCTOPUS_FINDINGS_START -->[\s\S]*?<!-- OCTOPUS_FINDINGS_END -->/g) ?? [];
 }
 
+export type FindingsMarkerState =
+  | { kind: "absent" }
+  | { kind: "single-valid" }
+  | { kind: "ambiguous"; reason: string };
+
+const CANONICAL_MARKER_LINE = /^[ \t]*<!-- OCTOPUS_FINDINGS_(START|END) -->[ \t]*$/;
+const MARKER_FRAGMENT = /OCTOPUS_FINDINGS_(START|END)/g;
+
+/** Classify markers on normalized text; block regexes cannot prove marker cardinality. */
+export function classifyFindingsMarkers(body: string): FindingsMarkerState {
+  let startLine = -1;
+  let endLine = -1;
+  for (const [index, line] of body.split(/\r?\n/).entries()) {
+    const fragments = line.match(MARKER_FRAGMENT);
+    if (!fragments) continue;
+    const canonical = CANONICAL_MARKER_LINE.exec(line);
+    if (!canonical || fragments.length !== 1) return { kind: "ambiguous", reason: "malformed or repeated marker on one line" };
+    if (canonical[1] === "START") {
+      if (startLine !== -1) return { kind: "ambiguous", reason: "multiple START markers" };
+      startLine = index;
+    } else {
+      if (endLine !== -1) return { kind: "ambiguous", reason: "multiple END markers" };
+      endLine = index;
+    }
+  }
+  if (startLine === -1 && endLine === -1) return { kind: "absent" };
+  if (startLine === -1) return { kind: "ambiguous", reason: "END without START" };
+  if (endLine === -1) return { kind: "ambiguous", reason: "START without END" };
+  if (startLine > endLine) return { kind: "ambiguous", reason: "END precedes START" };
+  return { kind: "single-valid" };
+}
+
 export function stripReviewReasoningArtifacts(body: string): string {
   return mapReviewPresentation(body, (presentation) => stripReasoningArtifacts(presentation));
 }
@@ -96,9 +128,8 @@ function findingIdentity(finding: InlineFinding): string {
 export function mergeRecoveredFindings(body: string, recovered: InlineFinding[], existing: InlineFinding[], coverage: ReviewCoverage): string | null {
   if (recovered.length === 0) return null;
   const normalizedBody = normalizeReviewResponse(body);
-  const blocks = findingsBlocks(normalizedBody);
-  if (blocks.length > 1) return null;
-  if (blocks.length === 0 && /OCTOPUS_FINDINGS_(?:START|END)/.test(normalizedBody)) return null;
+  const markers = classifyFindingsMarkers(normalizedBody);
+  if (markers.kind === "ambiguous") return null;
   const byKey = new Map<string, InlineFinding>();
   const add = (finding: InlineFinding): boolean => {
     const key = `${finding.filePath}:${finding.title}`;
@@ -112,23 +143,26 @@ export function mergeRecoveredFindings(body: string, recovered: InlineFinding[],
   const merged = [...byKey.values()];
   if (merged.length === 0) return null;
   const canonical = `${FINDINGS_START_MARKER}\n\`\`\`json\n${JSON.stringify(merged, null, 2)}\n\`\`\`\n${FINDINGS_END_MARKER}`;
-  const candidate = blocks.length === 1
+  const candidate = markers.kind === "single-valid"
     ? normalizedBody.replace(/<!-- OCTOPUS_FINDINGS_START -->[\s\S]*?<!-- OCTOPUS_FINDINGS_END -->/, canonical)
     : `${normalizedBody.trimEnd()}\n\n${canonical}`;
   return validReviewFindings(candidate) && reviewResponseValidationError(candidate, coverage.complete) === null ? candidate : null;
 }
 
 export function prepareRecoveredReviewPresentation(body: string, rawRecovery: string, findings: InlineFinding[], coverage: ReviewCoverage): string | null {
+  const normalizedBody = normalizeReviewResponse(body);
+  const markers = classifyFindingsMarkers(normalizedBody);
+  if (markers.kind === "ambiguous") return null;
   const recoveryBody = recoveryFindingsBody(rawRecovery);
   if (parseRecoveryFindingsSet(rawRecovery) === null) {
     const rejected = containExcludedInputClaims(recoveryBody, coverage);
     if (rejected.paths.length === 0) return null;
     markExcludedInputAssessment(coverage);
-    return prepareReviewPresentation(excludedInputGapReport(rejected.paths, body), coverage);
+    return prepareReviewPresentation(excludedInputGapReport(rejected.paths, normalizedBody), coverage);
   }
-  const blocks = findingsBlocks(body);
-  if (blocks.length > 1 || (blocks.length === 0 && /OCTOPUS_FINDINGS_(?:START|END)/.test(body))) return null;
-  const presentation = blocks.length === 1 ? body.replace(/<!-- OCTOPUS_FINDINGS_START -->[\s\S]*?<!-- OCTOPUS_FINDINGS_END -->/g, "") : body;
+  const presentation = markers.kind === "single-valid"
+    ? normalizedBody.replace(/<!-- OCTOPUS_FINDINGS_START -->[\s\S]*?<!-- OCTOPUS_FINDINGS_END -->/g, "")
+    : normalizedBody;
   const combined = `${presentation}\n${FINDINGS_START_MARKER}\n${JSON.stringify(findings)}\n${FINDINGS_END_MARKER}`;
   const contained = containExcludedInputClaims(combined, coverage);
   if (contained.paths.length === 0) return null;
